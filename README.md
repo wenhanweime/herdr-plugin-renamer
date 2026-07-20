@@ -53,6 +53,40 @@ rows = [["state_icon", "agent"], ["$task"]]
 rows = [["workspace"], ["$task"]]
 ```
 
+## Fork additions (multi-agent naming)
+
+This fork extends upstream with:
+
+- **More agents**: Pi, Grok, and opencode transcripts are parsed in addition
+  to Claude Code and Codex. Grok has no herdr integration, so its session is
+  recovered from `~/.grok/active_sessions.json` by matching the pane's
+  foreground pid (cwd + newest-live as fallback); the prompt comes from the
+  `<user_query>` block in `chat_history.jsonl`. Pi integrations may report the
+  transcript path as the session value; that path is used directly.
+- **More rename targets**: besides the pane, the generated name is applied to
+  the herdr tab and the agent sidebar entry. Configure with
+  `HERDR_NAMING_TARGETS` or a `targets` config file (comma-separated subset of
+  `pane,tab,agent`; default all).
+- **More naming engines**: headless `opencode run` and `claude -p` join
+  FoundationModels and Codex. `HERDR_NAMING_ENGINE` (or an `engine` config
+  file) now accepts a comma-separated chain, e.g. `opencode,claude` for
+  machines where Apple Intelligence and direct Codex access are unavailable.
+  Engine binaries are resolved from standard install paths when the herdr
+  server runs with a minimal launchd PATH.
+- **CJK-friendly fallback**: when every engine fails, pane/tab/agent labels
+  keep a capped excerpt of the original (e.g. Chinese) prompt while the git
+  branch slug stays ASCII.
+
+| Additional setting | Default | Purpose |
+| ------------------ | ------- | ------- |
+| `HERDR_NAMING_TARGETS` (or `targets` file) | `pane,tab,agent` | Which herdr labels receive the name |
+| `HERDR_NAMING_ENGINE` (or `engine` file) | platform chain | Single engine or comma-separated chain |
+| `HERDR_NAMING_CLAUDE_BIN` / `HERDR_NAMING_CLAUDE_MODEL` | `claude` / unset | Claude engine binary and optional `--model` |
+| `HERDR_NAMING_OPENCODE_BIN` | `opencode` | opencode engine binary |
+| `HERDR_NAMING_GROK_DIR` | `~/.grok` | Grok home for session/transcript lookup |
+
+Config files live in `$(herdr plugin config-dir herdr-plugin-renamer)/`.
+
 ## Configuration
 
 All settings are optional.

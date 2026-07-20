@@ -6,13 +6,19 @@ use std::env;
 use std::path::PathBuf;
 
 /// Resolve the transcript file, read it, and return the first real user prompt.
-/// opencode stores one JSON file per message rather than a single transcript
-/// file, so it takes a directory-walking path instead of the shared file read.
+/// Some integrations (pi) report the transcript's absolute path as the session
+/// value, so an existing-file path short-circuits the per-agent glob. opencode
+/// stores one JSON file per message rather than a single transcript file, so
+/// it takes a directory-walking path instead of the shared file read.
 pub fn read_first_prompt(agent: &str, session_id: &str) -> Option<String> {
     if agent == "opencode" {
         return opencode_first_prompt(session_id);
     }
-    let path = resolve_path(agent, session_id)?;
+    let path = if session_id.starts_with('/') && std::path::Path::new(session_id).is_file() {
+        PathBuf::from(session_id)
+    } else {
+        resolve_path(agent, session_id)?
+    };
     let contents = std::fs::read_to_string(&path).ok()?;
     first_prompt(agent, &contents)
 }
