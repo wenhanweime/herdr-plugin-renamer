@@ -1,8 +1,9 @@
 //! herdr-plugin-renamer
 //!
-//! A herdr event hook (`pane.agent_status_changed`) that names a pane from the
-//! agent's first prompt, and also renames an auto-generated worktree
-//! branch/workspace when the pane is in a linked worktree.
+//! A herdr event hook (`pane.agent_status_changed`) that names a pane (and by
+//! default its tab and agent sidebar entry) from the agent's first prompt, and
+//! also renames an auto-generated worktree branch/workspace when the pane is
+//! in a linked worktree.
 //!
 //! The binary runs in two phases:
 //!   - HOT  (default): fires on every event. Bails in microseconds from env
@@ -10,17 +11,20 @@
 //!     phase detached and exits.
 //!   - COLD (`HERDR_NAMING_PHASE=cold`): does the slow work (poll for the
 //!     session, read the first prompt, generate a slug via the engine chain,
-//!     rename the pane, and maybe rename branch + workspace).
+//!     rename the targets, and maybe rename branch + workspace).
 //!
 //! Every path exits 0 (fail open) so the hook never wedges herdr.
 
+mod claude;
 mod codex;
 mod context;
 mod engine;
 #[cfg(target_os = "macos")]
 mod foundation;
 mod git;
+mod grok;
 mod herdr;
+mod opencode;
 mod slug;
 mod transcript;
 
@@ -108,15 +112,38 @@ fn cold_phase() {
 
     // Resolve the native session (with the timing-race poll), then the prompt.
     // On a transient miss, drop the claim so a later event retries.
-    let (agent, session_id) =
-        match herdr::poll_agent_session(&pane_id, SESSION_POLL_ATTEMPTS, SESSION_POLL_DELAY) {
-            Some(session) => session,
+    let snapshot =
+        match herdr::poll_pane_snapshot(&pane_id, SESSION_POLL_ATTEMPTS, SESSION_POLL_DELAY) {
+            Some(snapshot) => snapshot,
             None => {
-                debug_log("cold: no agent_session after poll, removing claim");
+                debug_log("cold: no pane snapshot after poll, removing claim");
                 let _ = std::fs::remove_file(&claim_marker);
                 return;
             }
         };
+    // A reported session (integration hook) wins. Grok has no integration, so
+    // its session is recovered from grok's own active-session registry via the
+    // pane's foreground pids / cwd.
+    let (agent, session_id) = match snapshot.session.clone() {
+        Some(session) => session,
+        None => match snapshot.detected_agent.as_deref() {
+            Some("grok") => match grok::resolve_session(&pane_id, snapshot.cwd.as_deref()) {
+                Some(session_id) => ("grok".to_string(), session_id),
+                None => {
+                    debug_log("cold: grok session not found in active_sessions, removing claim");
+                    let _ = std::fs::remove_file(&claim_marker);
+                    return;
+                }
+            },
+            other => {
+                debug_log(&format!(
+                    "cold: no agent_session after poll (detected={other:?}), removing claim"
+                ));
+                let _ = std::fs::remove_file(&claim_marker);
+                return;
+            }
+        },
+    };
     debug_log(&format!("cold: session agent={agent} id={session_id}"));
 
     // Poll for the first prompt, not just read once. Claude reports its session
@@ -139,22 +166,57 @@ fn cold_phase() {
     ));
 
     // Name it: walk the engine chain (on-device first by default, Codex
-    // fallback), then a deterministic local slug if every engine fails.
+    // fallback). If every engine fails, `name` (labels) keeps the prompt's
+    // original script via the display fallback while `slug` (git branch) stays
+    // ASCII via the deterministic local fallback.
     let slug_file = format!("{state_dir}/{marker_key}.slug");
-    let slug = generate_slug(&prompt, Path::new(&slug_file)).unwrap_or_else(|| {
-        let slug = slug::fallback_from_prompt(&prompt);
-        debug_log(&format!("cold: all engines failed, fallback slug={slug}"));
-        slug
-    });
+    let (name, slug) = match generate_slug(&prompt, Path::new(&slug_file)) {
+        Some(slug) => (slug.clone(), slug),
+        None => {
+            let name = slug::display_fallback(&prompt);
+            let slug = slug::fallback_from_prompt(&prompt);
+            debug_log(&format!(
+                "cold: all engines failed, fallback name={name} slug={slug}"
+            ));
+            (name, slug)
+        }
+    };
 
-    let ok = herdr::pane_rename(&pane_id, &slug);
-    debug_log(&format!("cold: pane {pane_id} -> {slug} ok={ok}"));
+    // Rename the configured targets. Pane is the always-present base; tab and
+    // agent are herdr-API extras that default on and can be trimmed via the
+    // `targets` knob. Each failure is logged and non-fatal.
+    let targets = resolve_targets();
+    if targets.iter().any(|t| t == "pane") {
+        let ok = herdr::pane_rename(&pane_id, &name);
+        debug_log(&format!("cold: pane {pane_id} -> {name} ok={ok}"));
+    }
+    if targets.iter().any(|t| t == "tab") {
+        match snapshot.tab_id.as_deref() {
+            Some(tab_id) => {
+                let ok = herdr::tab_rename(tab_id, &name);
+                debug_log(&format!("cold: tab {tab_id} -> {name} ok={ok}"));
+            }
+            None => debug_log("cold: skip tab rename, no tab_id in snapshot"),
+        }
+    }
+    if targets.iter().any(|t| t == "agent") {
+        // herdr rejects a manual agent name another agent already holds, so
+        // retry once with a pane-derived suffix before giving up.
+        let mut ok = herdr::agent_rename(&pane_id, &name);
+        if !ok {
+            let alt = format!("{name}-{}", pane_suffix(&pane_id));
+            ok = herdr::agent_rename(&pane_id, &alt);
+            debug_log(&format!("cold: agent {pane_id} -> {alt} ok={ok} (retry)"));
+        } else {
+            debug_log(&format!("cold: agent {pane_id} -> {name} ok={ok}"));
+        }
+    }
 
     // Publish the same task name as display metadata so users can place `$task`
     // in custom Agent and Space sidebar rows. Metadata failures do not affect
     // the persistent pane, branch, or workspace renames.
-    let pane_metadata_ok = herdr::pane_report_task(&pane_id, &slug);
-    let workspace_metadata_ok = herdr::workspace_report_task(&workspace_id, &slug);
+    let pane_metadata_ok = herdr::pane_report_task(&pane_id, &name);
+    let workspace_metadata_ok = herdr::workspace_report_task(&workspace_id, &name);
     debug_log(&format!(
         "cold: task metadata pane={pane_metadata_ok} workspace={workspace_metadata_ok}"
     ));
@@ -194,16 +256,24 @@ fn cold_phase() {
     let _ = std::fs::write(&done_marker, now_secs().to_string());
 }
 
-/// Walk the engine chain selected by `HERDR_NAMING_ENGINE`, returning the first
-/// slug an engine produces. `None` means every engine in the chain failed (so
-/// the caller uses the deterministic local fallback).
+/// Walk the engine chain selected by the `HERDR_NAMING_ENGINE` env var (or an
+/// `engine` file in the per-plugin config dir), returning the first slug an
+/// engine produces. `None` means every engine in the chain failed (so the
+/// caller uses the deterministic local fallback).
 fn generate_slug(prompt: &str, slug_file: &Path) -> Option<String> {
-    let selection = env::var("HERDR_NAMING_ENGINE").ok();
+    let selection = env::var("HERDR_NAMING_ENGINE").ok().or_else(|| {
+        let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+        std::fs::read_to_string(format!("{dir}/engine"))
+            .ok()
+            .map(|s| s.trim().to_string())
+    });
     for eng in engine::engine_chain(selection.as_deref()) {
         let result = match eng {
             #[cfg(target_os = "macos")]
             engine::Engine::Foundation => foundation::generate_slug(prompt),
             engine::Engine::Codex => codex::generate_slug(prompt, slug_file),
+            engine::Engine::Opencode => opencode::generate_slug(prompt),
+            engine::Engine::Claude => claude::generate_slug(prompt),
         };
         match result {
             Some(slug) => {
@@ -240,6 +310,41 @@ fn resolve_branch_prefix() -> Option<String> {
     }
     let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
     std::fs::read_to_string(format!("{dir}/branch-prefix")).ok()
+}
+
+/// Resolve which herdr labels get the generated name: the
+/// `HERDR_NAMING_TARGETS` env var, then a `targets` file in the per-plugin
+/// config dir, else all of them. Comma-separated subset of pane/tab/agent.
+fn resolve_targets() -> Vec<String> {
+    let raw = env::var("HERDR_NAMING_TARGETS")
+        .ok()
+        .or_else(|| {
+            let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+            std::fs::read_to_string(format!("{dir}/targets")).ok()
+        })
+        .unwrap_or_default();
+    let parsed: Vec<String> = raw
+        .split(',')
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if parsed.is_empty() {
+        vec!["pane".into(), "tab".into(), "agent".into()]
+    } else {
+        parsed
+    }
+}
+
+/// A short unique-ish suffix from the pane id for de-duplicating agent names
+/// (e.g. `w4B:p1` -> `p1`).
+fn pane_suffix(pane_id: &str) -> String {
+    let tail = pane_id.rsplit(':').next().unwrap_or(pane_id);
+    let safe: String = tail.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if safe.is_empty() {
+        "2".to_string()
+    } else {
+        safe.to_ascii_lowercase()
+    }
 }
 
 /// Retry `read_first_prompt` until the transcript has the user's first message
@@ -374,7 +479,14 @@ fn debug_log(message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_branch, marker_key_for_pane};
+    use super::{compose_branch, marker_key_for_pane, pane_suffix};
+
+    #[test]
+    fn pane_suffix_takes_the_pane_segment() {
+        assert_eq!(pane_suffix("w4B:p1"), "p1");
+        assert_eq!(pane_suffix("solo"), "solo");
+        assert_eq!(pane_suffix(":"), "2");
+    }
 
     #[test]
     fn no_prefix_is_bare_slug() {

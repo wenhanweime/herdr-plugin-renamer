@@ -54,6 +54,27 @@ pub fn fallback_from_prompt(prompt: &str) -> String {
     }
 }
 
+const DISPLAY_MAX_CHARS: usize = 24;
+
+/// A display name for pane/tab/agent labels when every naming engine failed.
+/// `sanitize` is ASCII-only, so a CJK prompt would collapse to the generic
+/// `agent-task`; labels (unlike git branches) can carry the original script,
+/// so fall back to a capped excerpt of the prompt's first line instead.
+pub fn display_fallback(prompt: &str) -> String {
+    let ascii = fallback_from_prompt(prompt);
+    if ascii != "agent-task" {
+        return ascii;
+    }
+    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let compact = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped: String = compact.chars().take(DISPLAY_MAX_CHARS).collect();
+    if capped.is_empty() {
+        "agent-task".to_string()
+    } else {
+        capped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +125,30 @@ mod tests {
             fallback_from_prompt("\n\n  \nRefactor token validation"),
             "refactor-token-validation"
         );
+    }
+
+    #[test]
+    fn display_fallback_prefers_ascii_slug() {
+        assert_eq!(
+            display_fallback("Add JWT auth to the API endpoints please"),
+            "add-jwt-auth-to-the-api"
+        );
+    }
+
+    #[test]
+    fn display_fallback_keeps_cjk_prompts() {
+        assert_eq!(display_fallback("帮我优化数据库查询"), "帮我优化数据库查询");
+    }
+
+    #[test]
+    fn display_fallback_caps_long_cjk_prompts() {
+        let long = "这是一个非常长的中文提示词需要被截断".repeat(3);
+        assert_eq!(display_fallback(&long).chars().count(), 24);
+    }
+
+    #[test]
+    fn display_fallback_never_empty() {
+        assert_eq!(display_fallback("!!!"), "!!!");
+        assert_eq!(display_fallback(""), "agent-task");
     }
 }

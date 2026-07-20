@@ -2,6 +2,10 @@
 //! fallback chain. The cold phase tries each engine in turn and uses the first
 //! that returns a slug, falling back to a deterministic local slug if all fail.
 //!
+//! The knob accepts a single engine name or a comma-separated chain
+//! (`opencode,claude`). `foundation`, unset, empty, or unknown values resolve
+//! to the platform default chain.
+//!
 //! The on-device `Foundation` engine is macOS-only and is compiled out entirely
 //! on other targets (e.g. Linux): the enum variant does not exist there, so a
 //! non-macOS build can neither select nor reference Apple's FoundationModels.
@@ -13,30 +17,57 @@ pub enum Engine {
     Foundation,
     /// Headless `codex exec` call.
     Codex,
+    /// Headless `opencode run` call (uses the user's configured provider).
+    Opencode,
+    /// Headless `claude -p` call (uses the user's configured auth/relay).
+    Claude,
 }
 
 /// Resolve the engine knob to the ordered list of engines to try.
 ///
-/// - `codex`: Codex only (skip the on-device helper entirely).
+/// - a single name (`codex`, `opencode`, `claude`): that engine only.
+/// - a comma-separated list: those engines, in order (unknown names dropped).
 /// - anything else (`foundation`, unset, empty, unknown): the platform default
-///   chain. On macOS that is on-device first with Codex as the automatic
-///   fallback; on every other target there is no on-device engine, so the
-///   default collapses to Codex only.
+///   chain. On macOS that is on-device first with the headless CLIs as
+///   automatic fallbacks; elsewhere there is no on-device engine.
 pub fn engine_chain(selection: Option<&str>) -> Vec<Engine> {
-    match selection.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("codex") => vec![Engine::Codex],
-        _ => default_chain(),
+    let normalized = selection
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if normalized.is_empty() || normalized == "foundation" {
+        return default_chain();
+    }
+    let parsed: Vec<Engine> = normalized
+        .split(',')
+        .filter_map(|name| match name.trim() {
+            #[cfg(target_os = "macos")]
+            "foundation" => Some(Engine::Foundation),
+            "codex" => Some(Engine::Codex),
+            "opencode" => Some(Engine::Opencode),
+            "claude" => Some(Engine::Claude),
+            _ => None,
+        })
+        .collect();
+    if parsed.is_empty() {
+        default_chain()
+    } else {
+        parsed
     }
 }
 
 #[cfg(target_os = "macos")]
 fn default_chain() -> Vec<Engine> {
-    vec![Engine::Foundation, Engine::Codex]
+    vec![
+        Engine::Foundation,
+        Engine::Codex,
+        Engine::Opencode,
+        Engine::Claude,
+    ]
 }
 
 #[cfg(not(target_os = "macos"))]
 fn default_chain() -> Vec<Engine> {
-    vec![Engine::Codex]
+    vec![Engine::Codex, Engine::Opencode, Engine::Claude]
 }
 
 #[cfg(test)]
@@ -54,57 +85,84 @@ mod tests {
         assert_eq!(engine_chain(Some("  CODEX ")), vec![Engine::Codex]);
     }
 
+    #[test]
+    fn single_cli_engines_are_honored() {
+        assert_eq!(engine_chain(Some("opencode")), vec![Engine::Opencode]);
+        assert_eq!(engine_chain(Some("claude")), vec![Engine::Claude]);
+    }
+
+    #[test]
+    fn comma_chain_preserves_order_and_drops_unknowns() {
+        assert_eq!(
+            engine_chain(Some("opencode, claude")),
+            vec![Engine::Opencode, Engine::Claude]
+        );
+        assert_eq!(
+            engine_chain(Some("bogus,claude,codex")),
+            vec![Engine::Claude, Engine::Codex]
+        );
+    }
+
     #[cfg(target_os = "macos")]
     mod macos {
         use super::*;
 
         #[test]
-        fn default_chain_is_foundation_then_codex() {
-            assert_eq!(engine_chain(None), vec![Engine::Foundation, Engine::Codex]);
+        fn default_chain_is_foundation_then_clis() {
+            assert_eq!(
+                engine_chain(None),
+                vec![
+                    Engine::Foundation,
+                    Engine::Codex,
+                    Engine::Opencode,
+                    Engine::Claude
+                ]
+            );
         }
 
         #[test]
-        fn foundation_selection_keeps_codex_fallback() {
-            assert_eq!(
-                engine_chain(Some(" Foundation ")),
-                vec![Engine::Foundation, Engine::Codex]
-            );
+        fn foundation_selection_keeps_the_full_fallback_chain() {
+            assert_eq!(engine_chain(Some(" Foundation ")), engine_chain(None));
         }
 
         #[test]
         fn unknown_or_empty_falls_back_to_default_chain() {
+            assert_eq!(engine_chain(Some("bogus")), engine_chain(None));
+            assert_eq!(engine_chain(Some("")), engine_chain(None));
+        }
+
+        #[test]
+        fn foundation_in_a_comma_chain_is_literal() {
             assert_eq!(
-                engine_chain(Some("bogus")),
-                vec![Engine::Foundation, Engine::Codex]
-            );
-            assert_eq!(
-                engine_chain(Some("")),
-                vec![Engine::Foundation, Engine::Codex]
+                engine_chain(Some("foundation,opencode")),
+                vec![Engine::Foundation, Engine::Opencode]
             );
         }
     }
 
-    // Off macOS there is no on-device engine: every selection that is not an
-    // explicit `codex` still resolves to Codex only, and `foundation` is
-    // silently downgraded rather than attempted.
+    // Off macOS there is no on-device engine: `foundation` resolves to the
+    // default CLI chain rather than being attempted.
     #[cfg(not(target_os = "macos"))]
     mod non_macos {
         use super::*;
 
         #[test]
-        fn default_chain_is_codex_only() {
-            assert_eq!(engine_chain(None), vec![Engine::Codex]);
+        fn default_chain_is_cli_only() {
+            assert_eq!(
+                engine_chain(None),
+                vec![Engine::Codex, Engine::Opencode, Engine::Claude]
+            );
         }
 
         #[test]
-        fn foundation_request_is_downgraded_to_codex() {
-            assert_eq!(engine_chain(Some("foundation")), vec![Engine::Codex]);
+        fn foundation_request_is_downgraded_to_the_default_chain() {
+            assert_eq!(engine_chain(Some("foundation")), engine_chain(None));
         }
 
         #[test]
-        fn unknown_or_empty_is_codex_only() {
-            assert_eq!(engine_chain(Some("bogus")), vec![Engine::Codex]);
-            assert_eq!(engine_chain(Some("")), vec![Engine::Codex]);
+        fn unknown_or_empty_is_the_default_chain() {
+            assert_eq!(engine_chain(Some("bogus")), engine_chain(None));
+            assert_eq!(engine_chain(Some("")), engine_chain(None));
         }
     }
 }
