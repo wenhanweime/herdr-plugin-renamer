@@ -351,13 +351,20 @@ mod tests {
         let parsed = parse_engine_output("zh", "优化数据库索引", "Fix db index issue");
         assert_eq!(
             parsed,
-            Some(("优化数据库索引".to_string(), "fix-db-index-issue".to_string()))
+            Some((
+                "优化数据库索引".to_string(),
+                "fix-db-index-issue".to_string()
+            ))
         );
     }
 
     #[test]
     fn parse_zh_strips_quotes_and_caps_name() {
-        let parsed = parse_engine_output("zh", "\"很长的中文任务名称超过十六个字会被截断掉\"\nlong-name", "p");
+        let parsed = parse_engine_output(
+            "zh",
+            "\"很长的中文任务名称超过十六个字会被截断掉\"\nlong-name",
+            "p",
+        );
         let (name, slug) = parsed.unwrap();
         assert_eq!(name.chars().count(), 16);
         assert_eq!(slug, "long-name");
@@ -369,12 +376,10 @@ mod tests {
         // kebab slug. That must not become the tab label.
         assert!(parse_engine_output("zh", "1-2-3-6-h1-yoy\n", "美团增长调研").is_none());
         assert!(parse_engine_output("zh", "hr-hris-1-ai-2-ai", "招聘AI调研").is_none());
-        assert!(parse_engine_output(
-            "zh",
-            "claude-code-linux-do-v2ex-x\n",
-            "按平台改写宣传帖"
-        )
-        .is_none());
+        assert!(
+            parse_engine_output("zh", "claude-code-linux-do-v2ex-x\n", "按平台改写宣传帖")
+                .is_none()
+        );
     }
 
     #[test]
