@@ -339,7 +339,7 @@ fn resolve_branch_prefix() -> Option<String> {
 
 /// Resolve which herdr labels get the generated name: the
 /// `HERDR_NAMING_TARGETS` env var, then a `targets` file in the per-plugin
-/// config dir, else all of them. Comma-separated subset of pane/tab/agent.
+/// config dir, else the tab. Comma-separated subset of pane/tab/agent.
 fn resolve_targets() -> Vec<String> {
     let raw = env::var("HERDR_NAMING_TARGETS")
         .ok()
@@ -354,7 +354,7 @@ fn resolve_targets() -> Vec<String> {
         .filter(|t| !t.is_empty())
         .collect();
     if parsed.is_empty() {
-        vec!["pane".into(), "tab".into(), "agent".into()]
+        vec!["tab".into()]
     } else {
         parsed
     }

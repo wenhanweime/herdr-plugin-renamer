@@ -182,3 +182,27 @@ just link                  # run build, replace the local herdr link
 # On-device naming helper (built by the second [[build]] step on install):
 swift build -c release --package-path naming-helper   # -> naming-helper/.build/release/herdr-namer
 ```
+
+## Fork changes (multi-agent naming, this repo)
+
+This fork diverges from the upstream doc above in these ways:
+
+- Agents: transcript parsers also cover `pi` (JSONL), `grok`
+  (`chat_history.jsonl`, prompt inside `<user_query>` tags), and `opencode`
+  (`storage/message/<ses>/msg_*.json` + `storage/part/<msg>/prt_*.json`).
+  Path-form session values (pi reports the transcript path) are used directly.
+  Grok has no integration: `grok.rs` resolves the session from
+  `~/.grok/active_sessions.json` by pane foreground pid, else cwd+newest-live.
+- Engines: `opencode.rs` (headless `opencode run`, default model
+  `opencode/deepseek-v4-flash-free`, knob `opencode-model`) and `claude.rs`
+  (plain `claude -p`; extra startup-trimming flags stall on relay setups).
+  `engine_chain` accepts comma-separated chains; default macOS chain is
+  foundation → opencode → codex → claude. Engine knobs resolve env-first,
+  then a same-named file in `HERDR_PLUGIN_CONFIG_DIR`.
+- Styles: `style` knob `en`|`zh`. CLI engines receive a style-built two-line
+  instruction (`zh`: Chinese label + ASCII slug) and return raw output parsed
+  by `slug::parse_engine_output`. Foundation stays ASCII-only.
+- Targets: `targets` knob (default `tab`) selects pane/tab/agent renames.
+- Idempotence is session-scoped, not pane-scoped: the done marker stores the
+  named session id and is checked in the cold phase, so new sessions in a
+  long-lived pane are renamed; the hot phase keeps only the claim dedupe.

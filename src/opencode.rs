@@ -55,20 +55,31 @@ pub fn generate(instruction: &str) -> Option<String> {
     }
 }
 
+/// The default naming model: opencode zen's free DeepSeek v4 flash tier —
+/// fast (~5-8s), free, and reliably follows the two-line output format.
+const DEFAULT_MODEL: &str = "opencode/deepseek-v4-flash-free";
+
 /// Resolve the `--model provider/model` override: env, then an
-/// `opencode-model` file in the per-plugin config dir, else opencode's own
-/// default model.
+/// `opencode-model` file in the per-plugin config dir, else the built-in
+/// default. The literal value `default` opts into opencode's own configured
+/// default model instead.
 fn resolve_model() -> Option<String> {
-    if let Ok(model) = env::var("HERDR_NAMING_OPENCODE_MODEL") {
-        if !model.is_empty() {
-            return Some(model);
-        }
-    }
-    let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
-    std::fs::read_to_string(format!("{dir}/opencode-model"))
+    let configured = env::var("HERDR_NAMING_OPENCODE_MODEL")
         .ok()
-        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+            std::fs::read_to_string(format!("{dir}/opencode-model"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    if configured == "default" {
+        None
+    } else {
+        Some(configured)
+    }
 }
 
 /// Resolve the opencode binary: env override, then the standard install

@@ -1,6 +1,6 @@
 id = "herdr-plugin-renamer"
 name = "Herdr Renamer"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.7.4"
 description = "Names panes, tabs, and agents (Claude Code, Codex, Pi, Grok, opencode), plus auto-generated worktree branches and workspaces, from the agent's first prompt via an on-device or Codex naming call."
 # Unix-only (the cold phase detaches via setsid). On Linux the on-device engine

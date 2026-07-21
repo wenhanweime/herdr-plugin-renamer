@@ -59,15 +59,15 @@ pub fn engine_chain(selection: Option<&str>) -> Vec<Engine> {
 fn default_chain() -> Vec<Engine> {
     vec![
         Engine::Foundation,
-        Engine::Codex,
         Engine::Opencode,
+        Engine::Codex,
         Engine::Claude,
     ]
 }
 
 #[cfg(not(target_os = "macos"))]
 fn default_chain() -> Vec<Engine> {
-    vec![Engine::Codex, Engine::Opencode, Engine::Claude]
+    vec![Engine::Opencode, Engine::Codex, Engine::Claude]
 }
 
 #[cfg(test)]
@@ -113,8 +113,8 @@ mod tests {
                 engine_chain(None),
                 vec![
                     Engine::Foundation,
-                    Engine::Codex,
                     Engine::Opencode,
+                    Engine::Codex,
                     Engine::Claude
                 ]
             );
@@ -150,7 +150,7 @@ mod tests {
         fn default_chain_is_cli_only() {
             assert_eq!(
                 engine_chain(None),
-                vec![Engine::Codex, Engine::Opencode, Engine::Claude]
+                vec![Engine::Opencode, Engine::Codex, Engine::Claude]
             );
         }
 
