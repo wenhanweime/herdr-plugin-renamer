@@ -100,23 +100,117 @@ pub fn engine_instruction(style: &str, prompt: &str) -> String {
     let truncated = instruction_excerpt(prompt);
     match style {
         "zh" => format!(
-            "只输出两行，不要任何解释、引号或多余文字。\
-             第一行：不超过12个字的中文任务名，概括下面这个编码任务；\
-             第二行：2-4个英文单词的小写 kebab-case git 分支名（只含字母数字和连字符）。\
+            "只输出两行，不要任何解释、引号、编号或多余文字。\
+             第一行：必须是中文（含汉字），不超过12个字的任务主题名；\
+             禁止纯英文、禁止 kebab-case、禁止数字串/指标缩写（如 h1、yoy、1-2-3）。\
+             第二行：2-4个英文单词的小写 kebab-case git 分支名（只含字母数字和连字符），\
+             用可读的英文词，不要数字段。\
              任务内容：\n\n{truncated}"
         ),
         _ => format!(
             "Output only a short kebab-case git branch slug (2-4 words, lowercase, \
              hyphens only, no prose, no quotes, no surrounding text) summarizing \
-             this coding task:\n\n{truncated}"
+             this coding task. Prefer real words over numbers or metric codes \
+             (avoid labels like 1-2-3-h1-yoy):\n\n{truncated}"
         ),
     }
+}
+
+/// True when `ch` is a CJK Unified Ideograph (common Chinese hanzi range used
+/// for zh labels). Keeps the check allocation-free and independent of locales.
+fn is_cjk(ch: char) -> bool {
+    matches!(ch,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+    )
+}
+
+/// A zh-mode display label must carry at least one hanzi. Pure ASCII / kebab
+/// output (common when a free model ignores the two-line format) is rejected
+/// so the engine chain can fall through to a prompt-based fallback.
+fn is_good_zh_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.chars().any(is_cjk)
+}
+
+/// Reject digit-heavy or token-noise slugs that look like garbled metric dumps
+/// (`1-2-3-6-h1-yoy`) rather than a readable task name. Pure word slugs pass.
+fn is_good_slug(slug: &str) -> bool {
+    if slug.is_empty() || slug == "agent-task" {
+        return !slug.is_empty();
+    }
+    let tokens: Vec<&str> = slug.split('-').filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    // A single pure-digit token (`1`) is not a useful tab label.
+    if tokens.len() == 1 && tokens[0].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let digit_tokens = tokens
+        .iter()
+        .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
+        .count();
+    // Two or more pure-digit segments usually means the model latched onto
+    // chart indices / version bits instead of the task topic.
+    if digit_tokens >= 2 {
+        return false;
+    }
+    // Mostly non-letter content (digits + short codes) is also noise.
+    let alnum: Vec<char> = slug.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if alnum.is_empty() {
+        return false;
+    }
+    let letters = alnum.iter().filter(|c| c.is_ascii_alphabetic()).count();
+    if letters * 2 < alnum.len() {
+        return false;
+    }
+    true
+}
+
+/// Cap and strip quotes from a candidate display name line.
+fn clean_name_line(line: &str) -> String {
+    line.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace())
+        .chars()
+        .take(NAME_MAX_CHARS)
+        .collect()
+}
+
+/// Pick the best Chinese label from engine stdout lines (tail-first, then a
+/// reverse scan so status banners do not win over a real name line).
+fn pick_zh_name(lines: &[&str]) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    // Prefer the conventional "name then slug" layout: second-to-last line.
+    if lines.len() >= 2 {
+        let candidate = clean_name_line(lines[lines.len() - 2]);
+        if is_good_zh_name(&candidate) {
+            return Some(candidate);
+        }
+    }
+    // Model sometimes emits only a Chinese line, or buries it above junk.
+    for line in lines.iter().rev() {
+        let candidate = clean_name_line(line);
+        if is_good_zh_name(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Parse a CLI engine's raw output into `(label name, branch slug)` for the
 /// given style. `en` keeps the historical behavior (last non-empty line,
 /// sanitized, used for both). `zh` expects a name line then a slug line, and
 /// degrades gracefully when the model returns only one of them.
+///
+/// Quality gates: zh labels must contain hanzi; slugs must not be digit-noise.
+/// Failures return `None` so the engine chain / local fallback can take over
+/// instead of writing garbled tab names like `1-2-3-6-h1-yoy`.
 pub fn parse_engine_output(style: &str, raw: &str, prompt: &str) -> Option<(String, String)> {
     let lines: Vec<&str> = raw
         .lines()
@@ -127,31 +221,22 @@ pub fn parse_engine_output(style: &str, raw: &str, prompt: &str) -> Option<(Stri
 
     if style != "zh" {
         let slug = sanitize(last);
-        if slug.is_empty() {
+        if slug.is_empty() || !is_good_slug(&slug) {
             return None;
         }
         return Some((slug.clone(), slug));
     }
 
-    // Engines may print status lines first, so read from the tail: the slug is
-    // the last line, the Chinese name the one before it (or the same line when
-    // the model collapsed to a single line).
-    let name_line = if lines.len() >= 2 {
-        lines[lines.len() - 2]
-    } else {
-        last
-    };
-    let name: String = name_line
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace())
-        .chars()
-        .take(NAME_MAX_CHARS)
-        .collect();
-    if name.is_empty() {
-        return None;
-    }
+    let name = pick_zh_name(&lines)?;
+    // Prefer the last line as the branch slug when it is clean ASCII; otherwise
+    // derive from the prompt so we never ship digit-noise as a branch name.
     let mut slug = sanitize(last);
-    if slug.is_empty() {
+    if slug.is_empty() || !is_good_slug(&slug) {
         slug = fallback_from_prompt(prompt);
+    }
+    // If the prompt-derived slug is still empty/noise, keep a stable default.
+    if slug.is_empty() || !is_good_slug(&slug) {
+        slug = "agent-task".to_string();
     }
     Some((name, slug))
 }
@@ -266,15 +351,67 @@ mod tests {
         let parsed = parse_engine_output("zh", "优化数据库索引", "Fix db index issue");
         assert_eq!(
             parsed,
-            Some(("优化数据库索引".to_string(), "fix-db-index-issue".to_string()))
+            Some((
+                "优化数据库索引".to_string(),
+                "fix-db-index-issue".to_string()
+            ))
         );
     }
 
     #[test]
     fn parse_zh_strips_quotes_and_caps_name() {
-        let parsed = parse_engine_output("zh", "\"很长的中文任务名称超过十六个字会被截断掉\"\nlong-name", "p");
+        let parsed = parse_engine_output(
+            "zh",
+            "\"很长的中文任务名称超过十六个字会被截断掉\"\nlong-name",
+            "p",
+        );
         let (name, slug) = parsed.unwrap();
         assert_eq!(name.chars().count(), 16);
         assert_eq!(slug, "long-name");
+    }
+
+    #[test]
+    fn parse_zh_rejects_ascii_only_output() {
+        // Free models often ignore the zh two-line format and emit only a
+        // kebab slug. That must not become the tab label.
+        assert!(parse_engine_output("zh", "1-2-3-6-h1-yoy\n", "美团增长调研").is_none());
+        assert!(parse_engine_output("zh", "hr-hris-1-ai-2-ai", "招聘AI调研").is_none());
+        assert!(
+            parse_engine_output("zh", "claude-code-linux-do-v2ex-x\n", "按平台改写宣传帖")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_zh_finds_cjk_name_above_junk_slug() {
+        let prompt = "美团平台拉新唤醒用户增长调研";
+        let parsed = parse_engine_output(
+            "zh",
+            "thinking...\n美团拉新增长调研\n1-2-3-6-h1-yoy\n",
+            prompt,
+        );
+        let (name, slug) = parsed.unwrap();
+        assert_eq!(name, "美团拉新增长调研");
+        // Digit-noise last line is discarded; CJK prompt yields the local default.
+        assert_eq!(slug, "agent-task");
+        assert!(!slug.contains("1-2-3"));
+    }
+
+    #[test]
+    fn parse_en_rejects_digit_noise_slugs() {
+        assert!(parse_engine_output("", "1-2-3-6-h1-yoy\n", "prompt").is_none());
+        assert!(parse_engine_output("", "1\n", "prompt").is_none());
+        assert_eq!(
+            parse_engine_output("", "fix-db-index\n", "prompt"),
+            Some(("fix-db-index".to_string(), "fix-db-index".to_string()))
+        );
+    }
+
+    #[test]
+    fn is_good_slug_accepts_wordy_labels() {
+        assert!(is_good_slug("meituan-growth-research"));
+        assert!(is_good_slug("hr-ai-efficiency"));
+        assert!(!is_good_slug("1-2-3-6-h1-yoy"));
+        assert!(!is_good_slug("1"));
     }
 }

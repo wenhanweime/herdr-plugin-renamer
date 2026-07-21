@@ -625,7 +625,10 @@ mod tests {
             r#"{"type":"message","id":"b","message":{"role":"user","content":[{"type":"text","text":"Fix the login flow"}]}}"#,
             "\n",
         );
-        assert_eq!(first_prompt("pi", jsonl).as_deref(), Some("Fix the login flow"));
+        assert_eq!(
+            first_prompt("pi", jsonl).as_deref(),
+            Some("Fix the login flow")
+        );
     }
 
     #[test]
@@ -640,7 +643,10 @@ mod tests {
             r#"{"type":"user","content":[{"type":"text","text":"<user_query>\n帮我优化这个查询\n</user_query>"}]}"#,
             "\n",
         );
-        assert_eq!(first_prompt("grok", jsonl).as_deref(), Some("帮我优化这个查询"));
+        assert_eq!(
+            first_prompt("grok", jsonl).as_deref(),
+            Some("帮我优化这个查询")
+        );
     }
 
     #[test]
