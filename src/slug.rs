@@ -75,6 +75,72 @@ pub fn display_fallback(prompt: &str) -> String {
     }
 }
 
+const INSTRUCTION_PROMPT_LIMIT: usize = 2000;
+const NAME_MAX_CHARS: usize = 16;
+
+/// Build the instruction handed to a CLI naming engine. `en` asks for the
+/// historical single kebab slug; `zh` asks for a Chinese label line plus an
+/// ASCII branch-slug line so labels can carry CJK while branches stay ASCII.
+pub fn engine_instruction(style: &str, prompt: &str) -> String {
+    let truncated: String = prompt.chars().take(INSTRUCTION_PROMPT_LIMIT).collect();
+    match style {
+        "zh" => format!(
+            "只输出两行，不要任何解释、引号或多余文字。\
+             第一行：不超过12个字的中文任务名，概括下面这个编码任务；\
+             第二行：2-4个英文单词的小写 kebab-case git 分支名（只含字母数字和连字符）。\
+             任务内容：\n\n{truncated}"
+        ),
+        _ => format!(
+            "Output only a short kebab-case git branch slug (2-4 words, lowercase, \
+             hyphens only, no prose, no quotes, no surrounding text) summarizing \
+             this coding task:\n\n{truncated}"
+        ),
+    }
+}
+
+/// Parse a CLI engine's raw output into `(label name, branch slug)` for the
+/// given style. `en` keeps the historical behavior (last non-empty line,
+/// sanitized, used for both). `zh` expects a name line then a slug line, and
+/// degrades gracefully when the model returns only one of them.
+pub fn parse_engine_output(style: &str, raw: &str, prompt: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let last = *lines.last()?;
+
+    if style != "zh" {
+        let slug = sanitize(last);
+        if slug.is_empty() {
+            return None;
+        }
+        return Some((slug.clone(), slug));
+    }
+
+    // Engines may print status lines first, so read from the tail: the slug is
+    // the last line, the Chinese name the one before it (or the same line when
+    // the model collapsed to a single line).
+    let name_line = if lines.len() >= 2 {
+        lines[lines.len() - 2]
+    } else {
+        last
+    };
+    let name: String = name_line
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace())
+        .chars()
+        .take(NAME_MAX_CHARS)
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    let mut slug = sanitize(last);
+    if slug.is_empty() {
+        slug = fallback_from_prompt(prompt);
+    }
+    Some((name, slug))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +216,50 @@ mod tests {
     fn display_fallback_never_empty() {
         assert_eq!(display_fallback("!!!"), "!!!");
         assert_eq!(display_fallback(""), "agent-task");
+    }
+
+    #[test]
+    fn parse_en_takes_last_line_for_both() {
+        let parsed = parse_engine_output("", "thinking...\nfix-db-index\n", "prompt");
+        assert_eq!(
+            parsed,
+            Some(("fix-db-index".to_string(), "fix-db-index".to_string()))
+        );
+        assert!(parse_engine_output("", "！！！\n", "prompt").is_none());
+    }
+
+    #[test]
+    fn parse_zh_takes_name_then_slug() {
+        let parsed = parse_engine_output("zh", "优化数据库索引\nfix-db-index\n", "prompt");
+        assert_eq!(
+            parsed,
+            Some(("优化数据库索引".to_string(), "fix-db-index".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_zh_skips_leading_status_lines() {
+        let parsed = parse_engine_output("zh", "banner line\n优化数据库索引\nfix-db-index", "p");
+        assert_eq!(
+            parsed,
+            Some(("优化数据库索引".to_string(), "fix-db-index".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_zh_single_line_derives_slug_from_prompt() {
+        let parsed = parse_engine_output("zh", "优化数据库索引", "Fix db index issue");
+        assert_eq!(
+            parsed,
+            Some(("优化数据库索引".to_string(), "fix-db-index-issue".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_zh_strips_quotes_and_caps_name() {
+        let parsed = parse_engine_output("zh", "\"很长的中文任务名称超过十六个字会被截断掉\"\nlong-name", "p");
+        let (name, slug) = parsed.unwrap();
+        assert_eq!(name.chars().count(), 16);
+        assert_eq!(slug, "long-name");
     }
 }

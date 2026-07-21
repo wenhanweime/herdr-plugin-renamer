@@ -84,6 +84,7 @@ This fork extends upstream with:
 | `HERDR_NAMING_CLAUDE_BIN` / `HERDR_NAMING_CLAUDE_MODEL` | `claude` / unset | Claude engine binary and optional `--model` |
 | `HERDR_NAMING_OPENCODE_BIN` | `opencode` | opencode engine binary |
 | `HERDR_NAMING_GROK_DIR` | `~/.grok` | Grok home for session/transcript lookup |
+| `HERDR_NAMING_STYLE` (or `style` file) | `en` | `zh` = Chinese pane/tab/agent labels + ASCII branch slug |
 
 Config files live in `$(herdr plugin config-dir herdr-plugin-renamer)/`.
 

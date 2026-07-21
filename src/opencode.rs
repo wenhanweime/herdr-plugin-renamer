@@ -9,25 +9,19 @@ use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-const TIMEOUT: Duration = Duration::from_secs(30);
-const PROMPT_LIMIT: usize = 2000;
+// Typically 5-10s; occasional slow provider turns need headroom.
+const TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Run `opencode run` non-interactively and sanitize the last output line into
-/// a slug. Runs from the temp dir so opencode does not load project context,
-/// and with the herdr pane env stripped so opencode's herdr integration plugin
-/// stays inert for this throwaway call.
-pub fn generate_slug(prompt: &str) -> Option<String> {
+/// Run `opencode run` non-interactively and return its raw stdout for the
+/// caller to parse. Runs from the temp dir so opencode does not load project
+/// context, and with the herdr pane env stripped so opencode's herdr
+/// integration plugin stays inert for this throwaway call.
+pub fn generate(instruction: &str) -> Option<String> {
     let bin = resolve_bin()?;
-    let truncated: String = prompt.chars().take(PROMPT_LIMIT).collect();
-    let full_prompt = format!(
-        "Output only a short kebab-case git branch slug (2-4 words, lowercase, \
-         hyphens only, no prose, no quotes, no surrounding text) summarizing \
-         this coding task:\n\n{truncated}"
-    );
 
     let mut child = Command::new(bin)
         .arg("run")
-        .arg(&full_prompt)
+        .arg(instruction)
         .current_dir(env::temp_dir())
         .env_remove("HERDR_PANE_ID")
         .stdin(Stdio::null())
@@ -50,15 +44,10 @@ pub fn generate_slug(prompt: &str) -> Option<String> {
 
     let mut raw = String::new();
     child.stdout.take()?.read_to_string(&mut raw).ok()?;
-
-    // opencode may print status lines before the reply; the slug is the last
-    // non-empty line.
-    let last_line = raw.lines().rev().find(|l| !l.trim().is_empty())?;
-    let slug = crate::slug::sanitize(last_line);
-    if slug.is_empty() {
+    if raw.trim().is_empty() {
         None
     } else {
-        Some(slug)
+        Some(raw)
     }
 }
 

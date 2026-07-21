@@ -165,13 +165,12 @@ fn cold_phase() {
         prompt.chars().take(80).collect::<String>()
     ));
 
-    // Name it: walk the engine chain (on-device first by default, Codex
-    // fallback). If every engine fails, `name` (labels) keeps the prompt's
-    // original script via the display fallback while `slug` (git branch) stays
-    // ASCII via the deterministic local fallback.
+    // Name it: walk the engine chain. If every engine fails, `name` (labels)
+    // keeps the prompt's original script via the display fallback while `slug`
+    // (git branch) stays ASCII via the deterministic local fallback.
     let slug_file = format!("{state_dir}/{marker_key}.slug");
-    let (name, slug) = match generate_slug(&prompt, Path::new(&slug_file)) {
-        Some(slug) => (slug.clone(), slug),
+    let (name, slug) = match generate_name(&prompt, Path::new(&slug_file)) {
+        Some((name, slug)) => (name, slug),
         None => {
             let name = slug::display_fallback(&prompt);
             let slug = slug::fallback_from_prompt(&prompt);
@@ -257,33 +256,52 @@ fn cold_phase() {
 }
 
 /// Walk the engine chain selected by the `HERDR_NAMING_ENGINE` env var (or an
-/// `engine` file in the per-plugin config dir), returning the first slug an
-/// engine produces. `None` means every engine in the chain failed (so the
-/// caller uses the deterministic local fallback).
-fn generate_slug(prompt: &str, slug_file: &Path) -> Option<String> {
-    let selection = env::var("HERDR_NAMING_ENGINE").ok().or_else(|| {
-        let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
-        std::fs::read_to_string(format!("{dir}/engine"))
-            .ok()
-            .map(|s| s.trim().to_string())
-    });
+/// `engine` file in the per-plugin config dir), returning the first
+/// `(label name, branch slug)` an engine produces. Under the `zh` style the
+/// CLI engines return a Chinese label plus an ASCII slug; the on-device
+/// Foundation engine only produces ASCII slugs, which are used for both.
+/// `None` means every engine in the chain failed (so the caller uses the
+/// deterministic local fallbacks).
+fn generate_name(prompt: &str, out_file: &Path) -> Option<(String, String)> {
+    let selection = env::var("HERDR_NAMING_ENGINE")
+        .ok()
+        .or_else(|| read_config_knob("engine"));
+    let style = env::var("HERDR_NAMING_STYLE")
+        .ok()
+        .or_else(|| read_config_knob("style"))
+        .unwrap_or_default();
+    let instruction = slug::engine_instruction(&style, prompt);
     for eng in engine::engine_chain(selection.as_deref()) {
         let result = match eng {
             #[cfg(target_os = "macos")]
-            engine::Engine::Foundation => foundation::generate_slug(prompt),
-            engine::Engine::Codex => codex::generate_slug(prompt, slug_file),
-            engine::Engine::Opencode => opencode::generate_slug(prompt),
-            engine::Engine::Claude => claude::generate_slug(prompt),
+            engine::Engine::Foundation => {
+                foundation::generate_slug(prompt).map(|slug| (slug.clone(), slug))
+            }
+            engine::Engine::Codex => codex::generate(&instruction, out_file)
+                .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
+            engine::Engine::Opencode => opencode::generate(&instruction)
+                .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
+            engine::Engine::Claude => claude::generate(&instruction)
+                .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
         };
         match result {
-            Some(slug) => {
-                debug_log(&format!("cold: {eng:?} slug={slug}"));
-                return Some(slug);
+            Some((name, slug)) => {
+                debug_log(&format!("cold: {eng:?} name={name} slug={slug}"));
+                return Some((name, slug));
             }
-            None => debug_log(&format!("cold: {eng:?} produced no slug")),
+            None => debug_log(&format!("cold: {eng:?} produced no name")),
         }
     }
     None
+}
+
+/// Read a single-value knob file from the per-plugin config dir.
+fn read_config_knob(knob: &str) -> Option<String> {
+    let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+    std::fs::read_to_string(format!("{dir}/{knob}"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Join an optional branch prefix and the slug into the final branch name.

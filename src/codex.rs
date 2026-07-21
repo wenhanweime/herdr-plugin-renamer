@@ -8,24 +8,18 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-const PROMPT_LIMIT: usize = 2000;
 
-/// Run `codex exec` non-interactively to produce a slug. The model's final
-/// message is written to `slug_file` via `-o`; we read and sanitize it.
+/// Run `codex exec` non-interactively and return the raw final message for the
+/// caller to parse. The model's final message is written to `out_file` via
+/// `-o`; we read it back.
 ///
 /// `--ignore-user-config` is load-bearing: it disables the user's Codex hooks
 /// (SessionStart/UserPromptSubmit, including herdr's own), giving a
 /// deterministic, recursion-free run. Auth still resolves from CODEX_HOME.
-pub fn generate_slug(prompt: &str, slug_file: &Path) -> Option<String> {
+pub fn generate(instruction: &str, out_file: &Path) -> Option<String> {
     let bin = env::var("HERDR_NAMING_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    let truncated: String = prompt.chars().take(PROMPT_LIMIT).collect();
-    let full_prompt = format!(
-        "Output only a short kebab-case git branch slug (2-4 words, lowercase, \
-         hyphens only, no prose, no quotes, no surrounding text) summarizing \
-         this coding task:\n\n{truncated}"
-    );
 
-    let _ = std::fs::remove_file(slug_file);
+    let _ = std::fs::remove_file(out_file);
 
     let mut child = Command::new(bin)
         .args([
@@ -48,8 +42,8 @@ pub fn generate_slug(prompt: &str, slug_file: &Path) -> Option<String> {
             "service_tier=fast",
             "-o",
         ])
-        .arg(slug_file)
-        .arg(&full_prompt)
+        .arg(out_file)
+        .arg(instruction)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -62,12 +56,11 @@ pub fn generate_slug(prompt: &str, slug_file: &Path) -> Option<String> {
         return None;
     }
 
-    let raw = std::fs::read_to_string(slug_file).ok()?;
-    let slug = crate::slug::sanitize(&raw);
-    if slug.is_empty() {
+    let raw = std::fs::read_to_string(out_file).ok()?;
+    if raw.trim().is_empty() {
         None
     } else {
-        Some(slug)
+        Some(raw)
     }
 }
 

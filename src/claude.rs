@@ -11,21 +11,14 @@ use std::time::{Duration, Instant};
 // Claude -p pays full CLI startup (settings, MCP, hooks) plus the model call;
 // measured ~45s on a relay setup, so the ceiling is generous.
 const TIMEOUT: Duration = Duration::from_secs(60);
-const PROMPT_LIMIT: usize = 2000;
 
-/// Run `claude -p --output-format text` and sanitize stdout into a slug. Runs
-/// from the temp dir and with the herdr pane env stripped so the user's herdr
-/// integration hook stays inert for this throwaway call. No extra
-/// startup-trimming flags: several of them stall on relay/router setups, and
-/// the plain invocation is the shape verified to work.
-pub fn generate_slug(prompt: &str) -> Option<String> {
+/// Run `claude -p --output-format text` and return its raw stdout for the
+/// caller to parse. Runs from the temp dir and with the herdr pane env
+/// stripped so the user's herdr integration hook stays inert for this
+/// throwaway call. No extra startup-trimming flags: several of them stall on
+/// relay/router setups, and the plain invocation is the shape verified to work.
+pub fn generate(instruction: &str) -> Option<String> {
     let bin = resolve_bin()?;
-    let truncated: String = prompt.chars().take(PROMPT_LIMIT).collect();
-    let full_prompt = format!(
-        "Output only a short kebab-case git branch slug (2-4 words, lowercase, \
-         hyphens only, no prose, no quotes, no surrounding text) summarizing \
-         this coding task:\n\n{truncated}"
-    );
 
     let mut command = Command::new(bin);
     command.args(["-p", "--output-format", "text"]);
@@ -35,7 +28,7 @@ pub fn generate_slug(prompt: &str) -> Option<String> {
         }
     }
     let mut child = command
-        .arg(&full_prompt)
+        .arg(instruction)
         .current_dir(env::temp_dir())
         .env_remove("HERDR_PANE_ID")
         .stdin(Stdio::null())
@@ -58,13 +51,10 @@ pub fn generate_slug(prompt: &str) -> Option<String> {
 
     let mut raw = String::new();
     child.stdout.take()?.read_to_string(&mut raw).ok()?;
-
-    let last_line = raw.lines().rev().find(|l| !l.trim().is_empty())?;
-    let slug = crate::slug::sanitize(last_line);
-    if slug.is_empty() {
+    if raw.trim().is_empty() {
         None
     } else {
-        Some(slug)
+        Some(raw)
     }
 }
 
