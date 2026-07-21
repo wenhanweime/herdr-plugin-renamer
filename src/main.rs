@@ -66,14 +66,9 @@ fn hot_phase() {
     let marker_key = marker_key_for_pane(&eligible.pane_id);
 
     let state_dir = state_dir();
-    let done_marker = done_marker_path(&state_dir, &marker_key);
-    if Path::new(&done_marker).exists() {
-        debug_log(&format!(
-            "hot: done marker exists, bail pane={} ws={}",
-            eligible.pane_id, eligible.workspace_id
-        ));
-        return;
-    }
+    // The done marker records the SESSION that was already named, so the check
+    // lives in the cold phase (only it knows the current session). The hot
+    // gate keeps just the claim-freshness dedupe for event bursts.
     let claim_marker = claim_marker_path(&state_dir, &marker_key);
     if claim_is_fresh(&claim_marker) {
         debug_log(&format!(
@@ -145,6 +140,18 @@ fn cold_phase() {
         },
     };
     debug_log(&format!("cold: session agent={agent} id={session_id}"));
+
+    // Session-scoped idempotence: the done marker stores the session that was
+    // already named, so a NEW session in a long-lived pane gets its own name
+    // while repeat events for the same session stay no-ops.
+    if std::fs::read_to_string(&done_marker)
+        .map(|recorded| recorded.trim() == session_id)
+        .unwrap_or(false)
+    {
+        debug_log("cold: session already named, bail");
+        let _ = std::fs::remove_file(&claim_marker);
+        return;
+    }
 
     // Poll for the first prompt, not just read once. Claude reports its session
     // id at SessionStart (before the prompt is submitted) and flushes the user
@@ -252,7 +259,7 @@ fn cold_phase() {
     }
 
     let _ = std::fs::remove_file(&claim_marker);
-    let _ = std::fs::write(&done_marker, now_secs().to_string());
+    let _ = std::fs::write(&done_marker, &session_id);
 }
 
 /// Walk the engine chain selected by the `HERDR_NAMING_ENGINE` env var (or an
