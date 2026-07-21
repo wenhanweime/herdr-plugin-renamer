@@ -191,7 +191,18 @@ fn cold_phase() {
     // Rename the configured targets. Pane is the always-present base; tab and
     // agent are herdr-API extras that default on and can be trimmed via the
     // `targets` knob. Each failure is logged and non-fatal.
+    //
+    // Title placement (herdr 0.7.4 color rules):
+    //   - `workspace` is the only bright/bold Agent-sidebar token (text+bold).
+    //   - `tab` / `agent` / `pane` / `$task` all paint dim overlay0 (gray).
+    //   - Per-token style maps (`{ token, fg, bold, dim }`) are not accepted
+    //     by 0.7.4 config, so `$task` cannot be forced white on this release.
+    // Therefore the Chinese title always goes on `workspace` (top, white),
+    // and the tab gets the folder basename (second row, dim). Linked worktrees
+    // skip the title workspace rename so the later branch-slug rename wins.
+    // Note: multi-tab siblings share one workspace label (last writer wins).
     let targets = resolve_targets();
+    let folder = folder_label(snapshot.cwd.as_deref());
     if targets.iter().any(|t| t == "pane") {
         let ok = herdr::pane_rename(&pane_id, &name);
         debug_log(&format!("cold: pane {pane_id} -> {name} ok={ok}"));
@@ -199,8 +210,20 @@ fn cold_phase() {
     if targets.iter().any(|t| t == "tab") {
         match snapshot.tab_id.as_deref() {
             Some(tab_id) => {
-                let ok = herdr::tab_rename(tab_id, &name);
-                debug_log(&format!("cold: tab {tab_id} -> {name} ok={ok}"));
+                if !is_linked_worktree {
+                    let ws_ok = herdr::workspace_rename(&workspace_id, &name);
+                    debug_log(&format!(
+                        "cold: title-on-workspace (bright) ws={workspace_id}->{name} ok={ws_ok}"
+                    ));
+                } else {
+                    debug_log(
+                        "cold: skip title workspace rename (linked worktree keeps slug path)",
+                    );
+                }
+                let tab_ok = herdr::tab_rename(tab_id, &folder);
+                debug_log(&format!(
+                    "cold: tab {tab_id}->{folder} ok={tab_ok} (folder on dim row)"
+                ));
             }
             None => debug_log("cold: skip tab rename, no tab_id in snapshot"),
         }
@@ -372,6 +395,20 @@ fn pane_suffix(pane_id: &str) -> String {
     }
 }
 
+/// Basename of the pane cwd for the dim folder label on the tab row.
+fn folder_label(cwd: Option<&str>) -> String {
+    let path = cwd.unwrap_or("").trim_end_matches('/');
+    if path.is_empty() {
+        return "project".to_string();
+    }
+    let name = path.rsplit('/').next().unwrap_or(path).trim();
+    if name.is_empty() {
+        "project".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Retry `read_first_prompt` until the transcript has the user's first message
 /// or we exhaust the attempts. Covers the lag between the pane reporting
 /// `working` and the agent flushing the first user line to its transcript.
@@ -504,13 +541,24 @@ fn debug_log(message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_branch, marker_key_for_pane, pane_suffix};
+    use super::{compose_branch, folder_label, marker_key_for_pane, pane_suffix};
 
     #[test]
     fn pane_suffix_takes_the_pane_segment() {
         assert_eq!(pane_suffix("w4B:p1"), "p1");
         assert_eq!(pane_suffix("solo"), "solo");
         assert_eq!(pane_suffix(":"), "2");
+    }
+
+    #[test]
+    fn folder_label_uses_cwd_basename() {
+        assert_eq!(
+            folder_label(Some("/Users/pot/Documents/aitemp")),
+            "aitemp"
+        );
+        assert_eq!(folder_label(Some("/Users/pot/Documents/aitemp/")), "aitemp");
+        assert_eq!(folder_label(None), "project");
+        assert_eq!(folder_label(Some("/")), "project");
     }
 
     #[test]

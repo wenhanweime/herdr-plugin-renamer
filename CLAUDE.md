@@ -15,20 +15,30 @@ Single binary, two phases (`src/main.rs`):
   this pane does not already have a done marker. On a pass, writes a pane-scoped
   claim marker and forks the cold phase detached (`setsid`).
 - **Cold phase** (`HERDR_NAMING_PHASE=cold`): `herdr::poll_agent_session` →
-  `transcript::read_first_prompt` → `main::generate_slug` (walks the
-  `engine::engine_chain`; fallback `slug::fallback_from_prompt`) →
-  `herdr::pane_rename`. The generated slug is also reported as the `task`
-  metadata token on the pane and workspace for custom Agent and Space sidebar
-  rows. If the pane is in a
-  linked worktree whose current branch starts with `worktree/`,
-  `git::rename_current_branch` renames it to `<prefix>/<slug>` and only then
-  `herdr::workspace_rename` renames the workspace to `<slug>`.
+  `transcript::read_first_prompt` → `main::generate_name` (walks the
+  `engine::engine_chain`; fallbacks `slug::display_fallback` for labels and
+  `slug::fallback_from_prompt` for branch slugs) → renames configured targets.
+  The generated name is also reported as the `task` metadata token on the pane
+  and workspace for custom Agent and Space sidebar rows.
+  With the default `tab` target on a non-linked workspace, the **title is
+  written to `workspace`** (herdr 0.7.4's only bright Agent-sidebar token) and
+  the **tab gets the cwd folder basename** (dim). Linked worktrees skip that
+  title-on-workspace step so the later branch-slug rename can own the label.
+  Multi-tab siblings share one workspace label (last writer wins).
+  If the pane is in a linked worktree whose current branch starts with
+  `worktree/`, `git::rename_current_branch` renames it to `<prefix>/<slug>` and
+  only then `herdr::workspace_rename` renames the workspace to `<slug>`.
 
-Naming outputs: pane `<slug>`; branch `<prefix>/<slug>` (bare `<slug>` when no prefix is configured;
-`main::compose_branch` joins them); workspace `<slug>` after a successful
-worktree branch rename. The prefix comes from `main::resolve_branch_prefix`:
-`HERDR_NAMING_BRANCH_PREFIX` env, then a `branch-prefix` file in
-`HERDR_PLUGIN_CONFIG_DIR`, else none.
+Naming outputs: title on workspace (non-worktree); folder on tab; optional
+pane/agent renames via `targets`; `$task` metadata always. Branch
+`<prefix>/<slug>` (bare `<slug>` when no prefix); workspace `<slug>` after a
+successful worktree branch rename. The prefix comes from
+`main::resolve_branch_prefix`: `HERDR_NAMING_BRANCH_PREFIX` env, then a
+`branch-prefix` file in `HERDR_PLUGIN_CONFIG_DIR`, else none.
+
+`zh` style: CLI engines return a Chinese label + ASCII slug; local fallback
+prefers a compact CJK topic (strips spoken fillers) over ASCII kebab when the
+prompt has hanzi.
 
 Foundation-generated slugs should be compact noun-topic labels, not literal
 sentence summaries. Prefer labels such as `current-file` over

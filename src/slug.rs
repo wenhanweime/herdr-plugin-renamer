@@ -55,17 +55,24 @@ pub fn fallback_from_prompt(prompt: &str) -> String {
 }
 
 const DISPLAY_MAX_CHARS: usize = 24;
+const ZH_DISPLAY_MAX_CHARS: usize = 12;
 
 /// A display name for pane/tab/agent labels when every naming engine failed.
-/// `sanitize` is ASCII-only, so a CJK prompt would collapse to the generic
-/// `agent-task`; labels (unlike git branches) can carry the original script,
-/// so fall back to a capped excerpt of the prompt's first line instead.
+/// Prefers a compact Chinese topic when the prompt has hanzi (zh style and
+/// mixed prompts); otherwise falls back to an ASCII kebab slug. Labels can
+/// carry the original script; git branches still use `fallback_from_prompt`.
 pub fn display_fallback(prompt: &str) -> String {
+    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if first_line.chars().any(is_cjk) {
+        let zh = zh_display_fallback(first_line);
+        if !zh.is_empty() {
+            return zh;
+        }
+    }
     let ascii = fallback_from_prompt(prompt);
     if ascii != "agent-task" {
         return ascii;
     }
-    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let compact = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
     let capped: String = compact.chars().take(DISPLAY_MAX_CHARS).collect();
     if capped.is_empty() {
@@ -73,6 +80,83 @@ pub fn display_fallback(prompt: &str) -> String {
     } else {
         capped
     }
+}
+
+/// Spoken-request fillers that add no topic signal in Chinese prompts.
+const ZH_FILLERS: &[&str] = &[
+    "帮我",
+    "帮忙",
+    "请你",
+    "麻烦",
+    "看一下",
+    "看下",
+    "看看",
+    "查一下",
+    "查下",
+    "检查一下",
+    "分析一下",
+    "说一下",
+    "讲一下",
+    "问一下",
+    "了解一下",
+    "研究一下",
+    "总结一下",
+    "请",
+    "一下",
+    "这个",
+    "那个",
+    "是否",
+    "如何",
+    "怎么",
+    "怎样",
+    "什么",
+    "为什么",
+    "有没有",
+    "能不能",
+    "可以",
+    "需要",
+];
+
+/// Build a short, scannable Chinese label from a prompt line: strip spoken
+/// fillers, keep CJK + useful Latin product tokens, cap to 12 chars.
+fn zh_display_fallback(line: &str) -> String {
+    let mut s = line.trim().to_string();
+    for filler in ZH_FILLERS {
+        s = s.replace(filler, "");
+    }
+    // Keep hanzi, common CJK punctuation, and short ASCII product tokens
+    // (herdr, NewAPI, GitHub). Collapse other punctuation to nothing.
+    let mut out = String::new();
+    let mut prev_ascii_word = false;
+    for ch in s.chars() {
+        if is_cjk(ch) {
+            if prev_ascii_word && !out.is_empty() {
+                // no separator; Chinese compounds read fine against product names
+            }
+            out.push(ch);
+            prev_ascii_word = false;
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_ascii_word = true;
+        } else if matches!(ch, '·' | '—' | '-' | '_' | '/') {
+            if !out.is_empty() && !out.ends_with(ch) {
+                out.push(ch);
+            }
+            prev_ascii_word = false;
+        } else {
+            // drop spaces / other punctuation between Chinese clauses
+            prev_ascii_word = false;
+        }
+    }
+    // Trim leftover separators and collapse runs.
+    let compact: String = out
+        .split(|c: char| matches!(c, '-' | '_' | '/' | '·' | '—'))
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("");
+    let capped: String = compact.chars().take(ZH_DISPLAY_MAX_CHARS).collect();
+    capped.trim_matches(|c: char| matches!(c, '-' | '_' | '/' | '·' | '—'))
+        .to_string()
 }
 
 const INSTRUCTION_HEAD_CHARS: usize = 500;
@@ -100,11 +184,16 @@ pub fn engine_instruction(style: &str, prompt: &str) -> String {
     let truncated = instruction_excerpt(prompt);
     match style {
         "zh" => format!(
-            "只输出两行，不要任何解释、引号、编号或多余文字。\
-             第一行：必须是中文（含汉字），不超过12个字的任务主题名；\
-             禁止纯英文、禁止 kebab-case、禁止数字串/指标缩写（如 h1、yoy、1-2-3）。\
-             第二行：2-4个英文单词的小写 kebab-case git 分支名（只含字母数字和连字符），\
-             用可读的英文词，不要数字段。\
+            "只输出两行，不要任何解释、引号、编号或多余文字。\n\
+             第一行：必须是中文（至少含一个汉字），4-12个字的清晰任务主题名。\n\
+             要求：名词短语，一眼能看懂在做什么；写「对象+动作/结果」，具体明确；\n\
+             去掉「帮我」「看下」「请」「一下」「如何」「怎么」等口语与疑问词；\n\
+             产品名/专有名词可保留原文夹在中文里（如 herdr、NewAPI、GitHub）。\n\
+             好例子：herdr标题位置统一 / NewAPI关闭DeepSeek / GitHub主页打造计划 / 今日工作进展\n\
+             坏例子：看下今天工作进展 / herdr-agent-5-agent / 帮我查一下 / 在吗\n\
+             禁止纯英文、禁止 kebab-case、禁止数字串/指标缩写（如 h1、yoy、1-2-3）。\n\
+             第二行：2-4个英文单词的小写 kebab-case git 分支名（只含字母数字和连字符），\n\
+             用可读的英文词，不要数字段。\n\
              任务内容：\n\n{truncated}"
         ),
         _ => format!(
@@ -302,14 +391,30 @@ mod tests {
     }
 
     #[test]
-    fn display_fallback_keeps_cjk_prompts() {
-        assert_eq!(display_fallback("帮我优化数据库查询"), "帮我优化数据库查询");
+    fn display_fallback_strips_cjk_fillers() {
+        assert_eq!(display_fallback("帮我优化数据库查询"), "优化数据库查询");
+        assert_eq!(display_fallback("看下今天工作进展"), "今天工作进展");
+    }
+
+    #[test]
+    fn display_fallback_prefers_cjk_over_ascii_in_mixed_prompts() {
+        // Mixed prompts used to collapse to english kebab (herdr-agent-…) and
+        // hide the Chinese topic. Prefer a compact CJK label instead.
+        let name = display_fallback(
+            "看下 herdr 总结 为什么有的 Agent 标题总结在上面有的在下面 当前的 5 个 agent 就有差异",
+        );
+        assert!(name.chars().any(is_cjk), "expected CJK in {name}");
+        assert!(!name.contains("agent-5"));
+        assert!(name.chars().count() <= ZH_DISPLAY_MAX_CHARS);
     }
 
     #[test]
     fn display_fallback_caps_long_cjk_prompts() {
         let long = "这是一个非常长的中文提示词需要被截断".repeat(3);
-        assert_eq!(display_fallback(&long).chars().count(), 24);
+        assert_eq!(
+            display_fallback(&long).chars().count(),
+            ZH_DISPLAY_MAX_CHARS
+        );
     }
 
     #[test]

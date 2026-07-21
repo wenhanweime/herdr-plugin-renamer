@@ -45,20 +45,31 @@ When an agent in a pane starts working on its first prompt, the plugin:
    from the agent's own transcript (context wrappers and slash-command noise
    are filtered out).
 2. Asks a naming engine for a short task name (and an ASCII branch slug).
-3. Renames the configured targets — by default the **tab**. A prompt like
-   "给登录页面加上手机号验证码登录" becomes the tab `手机验证码登录` in `zh`
-   mode, or `phone-otp-login` in the default English mode.
-4. Publishes the name as `task` metadata, available as `$task` in custom
-   Agent and Space sidebar rows:
+3. Renames targets when configured. With the default `tab` target (non-worktree
+   panes), the Chinese/English **title goes on the workspace** (herdr 0.7.4's
+   only bright Agent-sidebar token) and the **tab gets the folder basename**
+   (dim second row). Recommended sidebar layout:
 
    ```toml
    [ui.sidebar.agents]
-   rows = [["state_icon", "agent"], ["$task"]]
+   rows = [
+     ["state_icon", "workspace"],  # title, white/bold
+     ["agent", "tab"],             # agent · folder, dim
+   ]
    ```
+
+   A prompt like "给登录页面加上手机号验证码登录" becomes workspace
+   `手机验证码登录` in `zh` mode, or `phone-otp-login` in English mode.
+   Note: multi-tab siblings share one workspace label (last writer wins).
+   `$task` metadata is still published, but paints dim in herdr 0.7.4, so it
+   is a poor choice for the top title row until per-token styles land.
+
+4. Publishes the name as `task` metadata, available as `$task` in custom
+   Agent and Space sidebar rows.
 
 5. In an auto-generated linked worktree (branch starting with `worktree/`), it
    also renames the git branch to the ASCII slug — locally, never pushed — and
-   then the workspace.
+   then the workspace (skipping the title-on-workspace step so the slug wins).
 
 Renaming is **session-scoped**: a new agent session in a long-lived pane gets
 a fresh name; repeat events for the same session are no-ops. Every path fails
@@ -119,8 +130,17 @@ echo opencode > "$CFG/engine"   # 可选：只用 opencode 引擎，跳过其余
 ```
 
 支持 Claude Code / Codex / Grok / Pi / opencode。Grok 无需集成，自动通过
-`active_sessions.json` 反查会话。同一 pane 里每开一个新会话都会重新命名；
-命名目标默认只有 tab，可用 `targets` 配置为 `pane,tab,agent` 的任意组合。
+`active_sessions.json` 反查会话。同一 pane 里每开一个新会话都会重新命名。
+
+在 `targets` 含 `tab` 时（默认）：中文标题写到 **workspace**（侧栏唯一亮色
+token），tab 写目录名；另会发布 `$task` 元数据。建议侧栏：
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace"], ["agent", "tab"]]
+```
+
+`engine` 可写成链式如 `opencode,claude,codex`（前一个失败会继续试）。
 
 ## Local development
 
