@@ -9,8 +9,8 @@ use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-// Typically 5-10s; occasional slow provider turns need headroom.
-const TIMEOUT: Duration = Duration::from_secs(45);
+// Typically 5-20s depending on the configured relay model; generous headroom.
+const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Run `opencode run` non-interactively and return its raw stdout for the
 /// caller to parse. Runs from the temp dir so opencode does not load project
@@ -19,8 +19,12 @@ const TIMEOUT: Duration = Duration::from_secs(45);
 pub fn generate(instruction: &str) -> Option<String> {
     let bin = resolve_bin()?;
 
-    let mut child = Command::new(bin)
-        .arg("run")
+    let mut command = Command::new(bin);
+    command.arg("run");
+    if let Some(model) = resolve_model() {
+        command.args(["--model", &model]);
+    }
+    let mut child = command
         .arg(instruction)
         .current_dir(env::temp_dir())
         .env_remove("HERDR_PANE_ID")
@@ -49,6 +53,22 @@ pub fn generate(instruction: &str) -> Option<String> {
     } else {
         Some(raw)
     }
+}
+
+/// Resolve the `--model provider/model` override: env, then an
+/// `opencode-model` file in the per-plugin config dir, else opencode's own
+/// default model.
+fn resolve_model() -> Option<String> {
+    if let Ok(model) = env::var("HERDR_NAMING_OPENCODE_MODEL") {
+        if !model.is_empty() {
+            return Some(model);
+        }
+    }
+    let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+    std::fs::read_to_string(format!("{dir}/opencode-model"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Resolve the opencode binary: env override, then the standard install

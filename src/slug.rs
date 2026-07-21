@@ -75,14 +75,29 @@ pub fn display_fallback(prompt: &str) -> String {
     }
 }
 
-const INSTRUCTION_PROMPT_LIMIT: usize = 2000;
+const INSTRUCTION_HEAD_CHARS: usize = 500;
+const INSTRUCTION_TAIL_CHARS: usize = 300;
 const NAME_MAX_CHARS: usize = 16;
+
+/// A head+tail excerpt of the prompt for the engine instruction. Long prompts
+/// are usually pasted context with the actual request at one end; a short
+/// excerpt names just as well and keeps small relay models fast.
+fn instruction_excerpt(prompt: &str) -> String {
+    let char_count = prompt.chars().count();
+    if char_count <= INSTRUCTION_HEAD_CHARS + INSTRUCTION_TAIL_CHARS {
+        return prompt.to_string();
+    }
+    let head: String = prompt.chars().take(INSTRUCTION_HEAD_CHARS).collect();
+    let tail_start = char_count.saturating_sub(INSTRUCTION_TAIL_CHARS);
+    let tail: String = prompt.chars().skip(tail_start).collect();
+    format!("{head}\n\n[...中间省略...]\n\n{tail}")
+}
 
 /// Build the instruction handed to a CLI naming engine. `en` asks for the
 /// historical single kebab slug; `zh` asks for a Chinese label line plus an
 /// ASCII branch-slug line so labels can carry CJK while branches stay ASCII.
 pub fn engine_instruction(style: &str, prompt: &str) -> String {
-    let truncated: String = prompt.chars().take(INSTRUCTION_PROMPT_LIMIT).collect();
+    let truncated = instruction_excerpt(prompt);
     match style {
         "zh" => format!(
             "只输出两行，不要任何解释、引号或多余文字。\
