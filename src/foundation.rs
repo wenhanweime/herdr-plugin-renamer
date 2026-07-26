@@ -1,8 +1,9 @@
 //! The on-device naming engine: shells out to the `herdr-namer` Swift helper,
 //! which asks Apple's FoundationModels for a kebab-case slug. Mirrors
 //! `codex::generate_slug`: returns `None` on any failure (model unavailable,
-//! helper missing, timeout, non-zero exit) so the caller falls back to Codex
-//! and then a deterministic local slug. No network, no auth.
+//! helper missing, timeout, non-zero exit) so the caller can continue through
+//! its configured engine chain and then use the deterministic local slug. No
+//! network, no auth.
 
 use std::env;
 use std::io::Read;

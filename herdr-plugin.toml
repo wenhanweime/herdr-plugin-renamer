@@ -2,9 +2,9 @@ id = "herdr-plugin-renamer"
 name = "Herdr Renamer"
 version = "0.3.0"
 min_herdr_version = "0.7.4"
-description = "Names panes, tabs, and agents (Claude Code, Codex, Pi, Grok, opencode), plus auto-generated worktree branches and workspaces, from the agent's first prompt via an on-device or Codex naming call."
+description = "Names Herdr panes, tabs, agents, workspaces, and worktree branches from the first prompt, with resilient Pi and OpenCode fallbacks."
 # Unix-only (the cold phase detaches via setsid). On Linux the on-device engine
-# is compiled out and naming falls back to Codex; macOS adds FoundationModels.
+# is compiled out; the Pi and OpenCode default chain remains available.
 platforms = ["macos", "linux"]
 
 # Build steps run on `herdr plugin install` (not on `herdr plugin link`).
@@ -15,8 +15,8 @@ command = ["cargo", "build", "--release"]
 # The on-device naming engine: a SwiftPM CLI that calls Apple's FoundationModels.
 # macOS-only: gated so a Linux install never tries to run `swift build`. The
 # Rust binary compiles the Foundation engine out entirely off macOS, so this
-# step is the matching build-time gate. Optional at runtime (the plugin falls
-# back to Codex when it is missing or Apple Intelligence is unavailable).
+# step is the matching build-time gate. Optional at runtime (the plugin moves
+# to the next configured engine when it is missing or unavailable).
 [[build]]
 command = ["swift", "build", "-c", "release", "--package-path", "naming-helper"]
 platforms = ["macos"]

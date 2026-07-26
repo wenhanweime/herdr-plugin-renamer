@@ -150,13 +150,12 @@ fn zh_display_fallback(line: &str) -> String {
     }
     // Trim leftover separators and collapse runs.
     let compact: String = out
-        .split(|c: char| matches!(c, '-' | '_' | '/' | '·' | '—'))
+        .split(['-', '_', '/', '·', '—'])
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join("");
     let capped: String = compact.chars().take(ZH_DISPLAY_MAX_CHARS).collect();
-    capped.trim_matches(|c: char| matches!(c, '-' | '_' | '/' | '·' | '—'))
-        .to_string()
+    capped.trim_matches(['-', '_', '/', '·', '—']).to_string()
 }
 
 const INSTRUCTION_HEAD_CHARS: usize = 500;

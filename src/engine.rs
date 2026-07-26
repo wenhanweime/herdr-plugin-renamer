@@ -3,8 +3,8 @@
 //! that returns a slug, falling back to a deterministic local slug if all fail.
 //!
 //! The knob accepts a single engine name or a comma-separated chain
-//! (`opencode,claude`). `foundation`, unset, empty, or unknown values resolve
-//! to the platform default chain.
+//! (`pi,opencode`). Unset, empty, or unknown values resolve to the default
+//! Pi-then-OpenCode chain.
 //!
 //! The on-device `Foundation` engine is macOS-only and is compiled out entirely
 //! on other targets (e.g. Linux): the enum variant does not exist there, so a
@@ -21,20 +21,22 @@ pub enum Engine {
     Opencode,
     /// Headless `claude -p` call (uses the user's configured auth/relay).
     Claude,
+    /// Headless Pi calls with a configurable model fallback list.
+    Pi,
 }
 
 /// Resolve the engine knob to the ordered list of engines to try.
 ///
-/// - a single name (`codex`, `opencode`, `claude`): that engine only.
+/// - a single name (`pi`, `opencode`, `codex`, `claude`): that engine only.
 /// - a comma-separated list: those engines, in order (unknown names dropped).
-/// - anything else (`foundation`, unset, empty, unknown): the platform default
-///   chain. On macOS that is on-device first with the headless CLIs as
-///   automatic fallbacks; elsewhere there is no on-device engine.
+/// - unset, empty, or unknown: Pi followed by OpenCode.
+/// - `foundation`: the on-device macOS engine only; off macOS it resolves to
+///   the default chain because that engine is unavailable.
 pub fn engine_chain(selection: Option<&str>) -> Vec<Engine> {
     let normalized = selection
         .map(|s| s.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    if normalized.is_empty() || normalized == "foundation" {
+    if normalized.is_empty() {
         return default_chain();
     }
     let parsed: Vec<Engine> = normalized
@@ -45,6 +47,7 @@ pub fn engine_chain(selection: Option<&str>) -> Vec<Engine> {
             "codex" => Some(Engine::Codex),
             "opencode" => Some(Engine::Opencode),
             "claude" => Some(Engine::Claude),
+            "pi" => Some(Engine::Pi),
             _ => None,
         })
         .collect();
@@ -57,17 +60,12 @@ pub fn engine_chain(selection: Option<&str>) -> Vec<Engine> {
 
 #[cfg(target_os = "macos")]
 fn default_chain() -> Vec<Engine> {
-    vec![
-        Engine::Foundation,
-        Engine::Opencode,
-        Engine::Codex,
-        Engine::Claude,
-    ]
+    vec![Engine::Pi, Engine::Opencode]
 }
 
 #[cfg(not(target_os = "macos"))]
 fn default_chain() -> Vec<Engine> {
-    vec![Engine::Opencode, Engine::Codex, Engine::Claude]
+    vec![Engine::Pi, Engine::Opencode]
 }
 
 #[cfg(test)]
@@ -87,6 +85,7 @@ mod tests {
 
     #[test]
     fn single_cli_engines_are_honored() {
+        assert_eq!(engine_chain(Some("pi")), vec![Engine::Pi]);
         assert_eq!(engine_chain(Some("opencode")), vec![Engine::Opencode]);
         assert_eq!(engine_chain(Some("claude")), vec![Engine::Claude]);
     }
@@ -108,21 +107,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn default_chain_is_foundation_then_clis() {
-            assert_eq!(
-                engine_chain(None),
-                vec![
-                    Engine::Foundation,
-                    Engine::Opencode,
-                    Engine::Codex,
-                    Engine::Claude
-                ]
-            );
+        fn default_chain_is_pi_then_opencode() {
+            assert_eq!(engine_chain(None), vec![Engine::Pi, Engine::Opencode]);
         }
 
         #[test]
-        fn foundation_selection_keeps_the_full_fallback_chain() {
-            assert_eq!(engine_chain(Some(" Foundation ")), engine_chain(None));
+        fn foundation_selection_is_literal() {
+            assert_eq!(engine_chain(Some(" Foundation ")), vec![Engine::Foundation]);
         }
 
         #[test]
@@ -147,11 +138,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn default_chain_is_cli_only() {
-            assert_eq!(
-                engine_chain(None),
-                vec![Engine::Opencode, Engine::Codex, Engine::Claude]
-            );
+        fn default_chain_is_pi_then_opencode() {
+            assert_eq!(engine_chain(None), vec![Engine::Pi, Engine::Opencode]);
         }
 
         #[test]

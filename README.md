@@ -6,8 +6,8 @@ wall of `zsh` / `claude` / `codex` and start telling you what each session is
 actually doing.
 
 Supports **Claude Code, Codex, Grok, Pi, and opencode** sessions, English or
-Chinese labels, and a pluggable chain of naming engines — the default engine is
-opencode zen's free `deepseek-v4-flash-free` model, so naming costs nothing.
+Chinese labels, and a pluggable chain of naming engines. The default path tries
+Pi's configured model first, then multiple free OpenCode Zen models.
 
 Based on [wyattjoh/herdr-plugin-renamer](https://github.com/wyattjoh/herdr-plugin-renamer),
 extended with multi-agent support, tab/agent rename targets, CJK labels,
@@ -33,9 +33,9 @@ Grok needs no integration: its session is recovered from
 `~/.grok/active_sessions.json` automatically.
 
 Requirements: herdr 0.7.4+ on macOS or Linux, a Rust toolchain (the install
-builds from source), and the `opencode` CLI on PATH for the default naming
-engine. macOS additionally builds an on-device Apple FoundationModels helper
-(optional at runtime).
+builds from source), and the `pi` and `opencode` CLIs on PATH for the default
+naming chain. macOS additionally builds an optional Apple FoundationModels
+helper.
 
 ## What it does
 
@@ -83,8 +83,10 @@ var that takes precedence (env vars must be visible to the herdr server).
 
 | Knob (file / env)                                | Default                           | Purpose |
 | ------------------------------------------------ | --------------------------------- | ------- |
-| `engine` / `HERDR_NAMING_ENGINE`                 | platform chain                    | Naming engine: `opencode`, `claude`, `codex`, `foundation`, or a comma-separated chain like `opencode,claude` |
-| `opencode-model` / `HERDR_NAMING_OPENCODE_MODEL` | `opencode/deepseek-v4-flash-free` | Model for the opencode engine (`provider/model`); the literal `default` uses opencode's own configured model |
+| `engine` / `HERDR_NAMING_ENGINE`                 | `pi,opencode`                     | Naming agents in fallback order; `claude`, `codex`, and `foundation` remain available when explicitly selected |
+| `pi-models` / `HERDR_NAMING_PI_MODELS`           | Pi's configured default model      | Comma/newline-separated `provider/model` fallback list; `default` uses Pi's own selection |
+| `opencode-models` / `HERDR_NAMING_OPENCODE_MODELS` | three free OpenCode models       | Comma/newline-separated free-model fallback list |
+| `opencode-model` / `HERDR_NAMING_OPENCODE_MODEL` | unset                              | Legacy single-model override, used only when the plural setting is absent; `default` uses OpenCode's own selection |
 | `style` / `HERDR_NAMING_STYLE`                   | `en`                              | `zh` = Chinese labels + ASCII branch slug (one engine call returns both) |
 | `targets` / `HERDR_NAMING_TARGETS`               | `tab`                             | Comma-separated subset of `pane,tab,agent` to rename |
 | `branch-prefix` / `HERDR_NAMING_BRANCH_PREFIX`   | none                              | Prefix for renamed worktree branches (`you/fix-cache`) |
@@ -104,29 +106,32 @@ The engine chain is tried in order; the first success wins, and a
 deterministic local fallback guarantees a name even when every engine fails
 (CJK prompts keep a readable excerpt as the label).
 
-- **opencode** (recommended): headless `opencode run`, model configurable,
-  free by default via opencode zen's `deepseek-v4-flash-free` (~5-8s).
+- **pi** (default): ephemeral, tool-free `pi --print` calls. By default it uses
+  Pi's configured model; when `pi-models` is set, models are tried in order
+  until one returns a valid title and branch slug.
+- **opencode** (default fallback): headless `opencode run`; several free Zen
+  models are tried in `opencode-models` order.
 - **claude**: headless `claude -p`, uses your existing Claude Code auth/relay.
 - **codex**: headless `codex exec` (`gpt-5.5`, needs direct OpenAI access).
 - **foundation** (macOS): on-device Apple FoundationModels via a bundled Swift
   helper — no network, needs macOS 26+ on Apple Silicon with Apple
   Intelligence enabled.
 
-Default chain: `foundation → opencode → codex → claude` on macOS,
-`opencode → codex → claude` elsewhere. Pin `engine` (e.g. to `opencode`) to
-skip engines that can't work on your machine.
+Default chain on every platform: `pi (configured default or model list) →
+opencode (multiple free models) → deterministic local fallback`. Claude,
+Codex, and Foundation run only when explicitly included in `engine`.
 
 ## 中文说明（简）
 
 给 herdr 里的每个 agent 会话自动起名：读取会话的第一条用户消息，用大模型
-总结成短标签（默认用 opencode zen 的免费 DeepSeek v4 模型，零成本）。
+总结成短标签（默认先用 Pi 当前模型，再尝试 OpenCode Zen 免费模型）。
 
 ```sh
 herdr plugin install wenhanweime/herdr-plugin-renamer
 herdr integration install claude   # 按需：codex / pi / opencode
 CFG=$(herdr plugin config-dir herdr-plugin-renamer)
 echo zh       > "$CFG/style"    # 中文标签（worktree 分支名仍为英文 slug）
-echo opencode > "$CFG/engine"   # 可选：只用 opencode 引擎，跳过其余引擎的失败等待
+echo 'pi,opencode' > "$CFG/engine"
 ```
 
 支持 Claude Code / Codex / Grok / Pi / opencode。Grok 无需集成，自动通过
@@ -140,7 +145,8 @@ token），tab 写目录名；另会发布 `$task` 元数据。建议侧栏：
 rows = [["state_icon", "workspace"], ["agent", "tab"]]
 ```
 
-`engine` 可写成链式如 `opencode,claude,codex`（前一个失败会继续试）。
+`pi-models` 和 `opencode-models` 支持逗号或换行分隔；先在 Pi 内逐模型
+fallback，再在 OpenCode 内逐个尝试免费模型。
 
 ## Local development
 

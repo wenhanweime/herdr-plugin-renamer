@@ -2,9 +2,9 @@
 
 herdr plugin (Rust) that names a herdr pane from the coding agent's
 first prompt. When the pane is in an auto-generated linked worktree, it also
-renames the worktree branch and workspace. The naming engine is swappable:
-on-device Apple FoundationModels by default (a small Swift helper), with a
-headless Codex call as the automatic fallback.
+renames the worktree branch and workspace. The naming engine is swappable. The
+default chain uses headless Pi first and then free OpenCode models; Apple
+FoundationModels, Codex, and Claude remain explicit engine selections.
 
 ## Architecture
 
@@ -44,27 +44,31 @@ Foundation-generated slugs should be compact noun-topic labels, not literal
 sentence summaries. Prefer labels such as `current-file` over
 `change-selected-file-to-current`. The helper must ground labels in the actual
 prompt and avoid introducing absent concepts from examples or instructions.
-The default Foundation path is two-pass: generate several candidates, sanitize
-and dedupe them, then ask FoundationModels to select exactly one candidate from
-the cleaned list. Codex remains a fallback only when Foundation fails.
+The Foundation path is two-pass: generate several candidates, sanitize and
+dedupe them, then ask FoundationModels to select exactly one candidate from the
+cleaned list. Failure advances to the next configured engine, or the local
+deterministic fallback when no engine remains.
 
 ## Naming engines
 
-`generate_slug` (in `main.rs`) walks an ordered chain from `engine::engine_chain`,
-selected by `HERDR_NAMING_ENGINE`, and uses the first engine that returns a slug:
+`generate_name` (in `main.rs`) walks an ordered chain from `engine::engine_chain`,
+selected by `HERDR_NAMING_ENGINE`, and uses the first model that returns a valid
+name and slug:
 
-- unset / `foundation` / unknown → `[Foundation, Codex]` (on-device first)
-- `codex` → `[Codex]` only
+- unset / unknown → `[Pi, Opencode]`
+- `pi` uses its configured default or walks a configured model list; `opencode`
+  walks its free-model fallback list
+- `foundation`, `codex`, or `claude` can still be selected explicitly
 
-Each engine returns `Option<String>` and yields `None` on any failure, so the
-chain degrades cleanly: Foundation → Codex → deterministic local slug. Engine
-binaries are overridable via `HERDR_NAMING_FOUNDATION_BIN` and
-`HERDR_NAMING_CODEX_BIN`.
+Each model attempt yields `None` on command failure, timeout, empty output, or
+invalid naming output. The chain degrades cleanly to the deterministic local
+slug. Pi and OpenCode attempts have a 15-second per-model ceiling.
 
 **OS gate:** the `Foundation` engine is `#[cfg(target_os = "macos")]`. Off macOS
 (e.g. Linux) the enum variant, the `foundation` module, and the matching
-`[[build]]` swift step are all compiled/skipped, so the default chain collapses
-to `[Codex]` and a `foundation` request is silently downgraded. The plugin's
+`[[build]]` swift step are all compiled/skipped. The default remains
+`[Pi, Opencode]`; a `foundation`-only request resolves to that default chain
+when Foundation is unavailable. The plugin's
 `platforms` are `["macos", "linux"]` (Unix only; the cold phase detaches via
 `setsid`). Verify the Linux build with
 `cargo check --target x86_64-unknown-linux-gnu`.
@@ -126,7 +130,7 @@ to `[Codex]` and a `foundation` request is silently downgraded. The plugin's
   without per-call `@available`; runtime gating uses
   `SystemLanguageModel.default.availability` (`.deviceNotEligible` /
   `.appleIntelligenceNotEnabled` / `.modelNotReady`), reported as a non-zero
-  exit so Rust falls back to Codex.
+  exit so Rust can continue to the next configured engine.
 - The model lives behind a shared OS daemon, so the short-lived helper does not
   reload weights per spawn: warm ~0.3s, cold ~1-2s end-to-end. Both beat the
   Codex bar. Use `greedyOptions(maximumResponseTokens:)` for deterministic
@@ -150,11 +154,11 @@ to `[Codex]` and a `foundation` request is silently downgraded. The plugin's
   leak into slugs (for example, an unrelated OAuth example once caused `tell me
   about the commits on this branch` to become `oauth-redirect`).
   `maximumResponseTokens` must clear the JSON envelope plus generated values,
-  else a truncated object throws and falls back to Codex; the candidate pass
+  else a truncated object throws and advances to the next fallback; the candidate pass
   currently uses 160 tokens and the judge pass uses 64. The on-device daemon can
   be `.modelNotReady` for the first call(s) after a cold start, so the live
-  `cargo test foundation -- --ignored` check is flaky until warm (fails open to
-  Codex by design); re-run once warm.
+  `cargo test foundation -- --ignored` check is flaky until warm (fails open by
+  design); re-run once warm.
 
 - Foundation prompt input is capped with a head/tail excerpt, not a front-only
   truncation: Rust sends 1200 characters from the start and 1200 from the end
@@ -203,12 +207,13 @@ This fork diverges from the upstream doc above in these ways:
   Path-form session values (pi reports the transcript path) are used directly.
   Grok has no integration: `grok.rs` resolves the session from
   `~/.grok/active_sessions.json` by pane foreground pid, else cwd+newest-live.
-- Engines: `opencode.rs` (headless `opencode run`, default model
-  `opencode/deepseek-v4-flash-free`, knob `opencode-model`) and `claude.rs`
-  (plain `claude -p`; extra startup-trimming flags stall on relay setups).
-  `engine_chain` accepts comma-separated chains; default macOS chain is
-  foundation → opencode → codex → claude. Engine knobs resolve env-first,
-  then a same-named file in `HERDR_PLUGIN_CONFIG_DIR`.
+- Engines: `pi.rs` (ephemeral, tool-free `pi --print`, optional `pi-models`
+  fallback list; otherwise Pi's configured default) and
+  `opencode.rs` (headless `opencode run`, free-model knob `opencode-models`).
+  Both use ordered model fallback. `engine_chain` accepts comma-separated
+  agents and defaults to pi → opencode; Claude, Codex, and Foundation remain
+  explicit opt-ins. Engine knobs resolve env-first, then a same-named file in
+  `HERDR_PLUGIN_CONFIG_DIR`.
 - Styles: `style` knob `en`|`zh`. CLI engines receive a style-built two-line
   instruction (`zh`: Chinese label + ASCII slug) and return raw output parsed
   by `slug::parse_engine_output`. Foundation stays ASCII-only.

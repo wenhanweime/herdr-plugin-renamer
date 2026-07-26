@@ -25,6 +25,7 @@ mod git;
 mod grok;
 mod herdr;
 mod opencode;
+mod pi;
 mod slug;
 mod transcript;
 
@@ -309,8 +310,20 @@ fn generate_name(prompt: &str, out_file: &Path) -> Option<(String, String)> {
             }
             engine::Engine::Codex => codex::generate(&instruction, out_file)
                 .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
-            engine::Engine::Opencode => opencode::generate(&instruction)
-                .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
+            engine::Engine::Pi => generate_from_models(
+                "Pi",
+                pi::models(),
+                |model| pi::generate(&instruction, model),
+                &style,
+                prompt,
+            ),
+            engine::Engine::Opencode => generate_from_models(
+                "Opencode",
+                opencode::models(),
+                |model| opencode::generate(&instruction, model),
+                &style,
+                prompt,
+            ),
             engine::Engine::Claude => claude::generate(&instruction)
                 .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
         };
@@ -320,6 +333,28 @@ fn generate_name(prompt: &str, out_file: &Path) -> Option<(String, String)> {
                 return Some((name, slug));
             }
             None => debug_log(&format!("cold: {eng:?} produced no name")),
+        }
+    }
+    None
+}
+
+fn generate_from_models<F>(
+    engine: &str,
+    models: Vec<String>,
+    mut generate: F,
+    style: &str,
+    prompt: &str,
+) -> Option<(String, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    for model in models {
+        match generate(&model).and_then(|raw| slug::parse_engine_output(style, &raw, prompt)) {
+            Some(result) => {
+                debug_log(&format!("cold: {engine} model={model} succeeded"));
+                return Some(result);
+            }
+            None => debug_log(&format!("cold: {engine} model={model} produced no name")),
         }
     }
     None
@@ -541,7 +576,35 @@ fn debug_log(message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_branch, folder_label, marker_key_for_pane, pane_suffix};
+    use super::{
+        compose_branch, folder_label, generate_from_models, marker_key_for_pane, pane_suffix,
+    };
+
+    #[test]
+    fn model_fallback_continues_after_invalid_output() {
+        let models = vec!["bad-model".to_string(), "good-model".to_string()];
+        let mut attempted = Vec::new();
+        let result = generate_from_models(
+            "test",
+            models,
+            |model| {
+                attempted.push(model.to_string());
+                match model {
+                    "bad-model" => Some("not a valid Chinese title".to_string()),
+                    "good-model" => Some("修复标题命名\nfix-title-naming".to_string()),
+                    _ => None,
+                }
+            },
+            "zh",
+            "修复 Herdr 标题自动命名",
+        );
+
+        assert_eq!(attempted, vec!["bad-model", "good-model"]);
+        assert_eq!(
+            result,
+            Some(("修复标题命名".to_string(), "fix-title-naming".to_string()))
+        );
+    }
 
     #[test]
     fn pane_suffix_takes_the_pane_segment() {
@@ -552,11 +615,8 @@ mod tests {
 
     #[test]
     fn folder_label_uses_cwd_basename() {
-        assert_eq!(
-            folder_label(Some("/Users/pot/Documents/aitemp")),
-            "aitemp"
-        );
-        assert_eq!(folder_label(Some("/Users/pot/Documents/aitemp/")), "aitemp");
+        assert_eq!(folder_label(Some("/home/alice/projects/demo")), "demo");
+        assert_eq!(folder_label(Some("/home/alice/projects/demo/")), "demo");
         assert_eq!(folder_label(None), "project");
         assert_eq!(folder_label(Some("/")), "project");
     }

@@ -1,28 +1,29 @@
-//! Naming engine backed by a headless `opencode run` call. opencode resolves
-//! its own configured provider/model, which makes it the engine of choice on
-//! machines where Codex and Apple Intelligence are unavailable (e.g. behind
-//! relays). Returns `None` on any failure so the caller walks on down the
-//! engine chain.
+//! Naming engine backed by headless `opencode run` calls. The caller walks the
+//! configured free-model list and then falls through to the next engine.
 
 use std::env;
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-// Typically 5-20s depending on the configured relay model; generous headroom.
-const TIMEOUT: Duration = Duration::from_secs(60);
+const TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_MODELS: &[&str] = &[
+    "opencode/deepseek-v4-flash-free",
+    "opencode/ling-3.0-flash-free",
+    "opencode/mimo-v2.5-free",
+];
 
 /// Run `opencode run` non-interactively and return its raw stdout for the
 /// caller to parse. Runs from the temp dir so opencode does not load project
 /// context, and with the herdr pane env stripped so opencode's herdr
 /// integration plugin stays inert for this throwaway call.
-pub fn generate(instruction: &str) -> Option<String> {
+pub fn generate(instruction: &str, model: &str) -> Option<String> {
     let bin = resolve_bin()?;
 
     let mut command = Command::new(bin);
     command.arg("run");
-    if let Some(model) = resolve_model() {
-        command.args(["--model", &model]);
+    if model != "default" {
+        command.args(["--model", model]);
     }
     let mut child = command
         .arg(instruction)
@@ -55,31 +56,41 @@ pub fn generate(instruction: &str) -> Option<String> {
     }
 }
 
-/// The default naming model: opencode zen's free DeepSeek v4 flash tier —
-/// fast (~5-8s), free, and reliably follows the two-line output format.
-const DEFAULT_MODEL: &str = "opencode/deepseek-v4-flash-free";
-
-/// Resolve the `--model provider/model` override: env, then an
-/// `opencode-model` file in the per-plugin config dir, else the built-in
-/// default. The literal value `default` opts into opencode's own configured
-/// default model instead.
-fn resolve_model() -> Option<String> {
-    let configured = env::var("HERDR_NAMING_OPENCODE_MODEL")
+/// Models resolve from plural env/config, then the legacy singular knob. The
+/// legacy value `default` omits `--model` and keeps OpenCode's own selection.
+pub fn models() -> Vec<String> {
+    let configured = env::var("HERDR_NAMING_OPENCODE_MODELS")
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
-            std::fs::read_to_string(format!("{dir}/opencode-model"))
+            std::fs::read_to_string(format!("{dir}/opencode-models"))
                 .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+                .filter(|value| !value.trim().is_empty())
         })
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    if configured == "default" {
-        None
-    } else {
-        Some(configured)
-    }
+        .or_else(|| env::var("HERDR_NAMING_OPENCODE_MODEL").ok())
+        .or_else(|| {
+            let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+            std::fs::read_to_string(format!("{dir}/opencode-model")).ok()
+        });
+    configured
+        .as_deref()
+        .map(parse_model_list)
+        .filter(|models| !models.is_empty())
+        .unwrap_or_else(|| {
+            DEFAULT_MODELS
+                .iter()
+                .map(|model| model.to_string())
+                .collect()
+        })
+}
+
+fn parse_model_list(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Resolve the opencode binary: env override, then the standard install
@@ -119,5 +130,18 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus>
             }
             Err(_) => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_model_list;
+
+    #[test]
+    fn model_list_accepts_commas_and_lines() {
+        assert_eq!(
+            parse_model_list("a/one, b/two\nc/three\n"),
+            vec!["a/one", "b/two", "c/three"]
+        );
     }
 }
