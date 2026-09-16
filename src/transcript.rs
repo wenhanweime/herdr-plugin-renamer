@@ -1,6 +1,7 @@
 //! Resolving an agent transcript from a native session id and extracting the
 //! first genuine user prompt. Supports Claude Code, Codex, Pi, Grok, and
-//! opencode, which use different on-disk formats.
+//! opencode, with per-agent storage: on-disk transcript files for most, and
+//! `opencode export` for opencode 1.18+.
 
 use std::env;
 use std::path::PathBuf;
@@ -8,8 +9,8 @@ use std::path::PathBuf;
 /// Resolve the transcript file, read it, and return the first real user prompt.
 /// Some integrations (pi) report the transcript's absolute path as the session
 /// value, so an existing-file path short-circuits the per-agent glob. opencode
-/// stores one JSON file per message rather than a single transcript file, so
-/// it takes a directory-walking path instead of the shared file read.
+/// reads through the legacy file layout first and falls through to
+/// `opencode export` when the legacy layout does not resolve.
 pub fn read_first_prompt(agent: &str, session_id: &str) -> Option<String> {
     if agent == "opencode" {
         return opencode_first_prompt(session_id);
@@ -75,6 +76,16 @@ fn is_wrapped_context(text: &str) -> bool {
         || text.starts_with("<user_instructions>")
         || text.starts_with("<INSTRUCTIONS>")
         || text.starts_with("# AGENTS.md")
+}
+
+/// Accept a joined prompt text when it is non-empty and not wrapped context.
+/// Shared by the Pi and opencode parsers.
+fn genuine_prompt(text: String) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || is_wrapped_context(text) {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// Claude Code JSONL: the first `type=="user"` line that is not meta, carries
@@ -291,11 +302,9 @@ fn first_prompt_pi(contents: &str) -> Option<String> {
             continue;
         }
         let text = join_text_blocks(message.get("content"));
-        let text = text.trim();
-        if text.is_empty() || is_wrapped_context(text) {
-            continue;
+        if let Some(text) = genuine_prompt(text) {
+            return Some(text);
         }
-        return Some(text.to_string());
     }
     None
 }
@@ -338,7 +347,7 @@ fn first_prompt_grok(contents: &str) -> Option<String> {
 }
 
 /// Join the `text` fields of `[{type:"text",text:...}]` content blocks. Shared
-/// by the Pi and Grok parsers, whose block shape matches.
+/// by the Pi, Grok, and opencode parsers, whose block shape matches.
 fn join_text_blocks(content: Option<&serde_json::Value>) -> String {
     content
         .and_then(|c| c.as_array())
@@ -352,10 +361,111 @@ fn join_text_blocks(content: Option<&serde_json::Value>) -> String {
         .unwrap_or_default()
 }
 
-/// opencode splits a session across `storage/message/<session_id>/msg_*.json`
-/// (role metadata) and `storage/part/<message_id>/prt_*.json` (content blocks).
-/// Message and part ids are time-ordered, so a filename sort is chronological.
+/// opencode 1.18+ keeps sessions in a SQLite database instead of files on
+/// disk, and `opencode export <session>` prints the whole session in
+/// chronological order:
+///   { "info": {...}, "messages": [ { "info": { "role": "user", ... },
+///     "parts": [ { "type": "text", "text": ... } ] } ] }
+/// The legacy file layout is tried first: on pre-1.18 versions it succeeds
+/// with no subprocess, and on 1.18+ a single failed directory probe precedes
+/// the export call.
 fn opencode_first_prompt(session_id: &str) -> Option<String> {
+    let prompt = opencode_first_prompt_with(
+        session_id,
+        opencode_files_first_prompt,
+        opencode_export_first_prompt,
+    );
+    if prompt.is_none() {
+        crate::debug_log("opencode export produced no first prompt");
+    }
+    prompt
+}
+
+/// The two-backend selection policy, pure so the fall-through ordering is
+/// unit-testable: a legacy-layout hit wins, a legacy miss falls through to
+/// `opencode export`, and both missing is `None` (the wrapper logs it).
+fn opencode_first_prompt_with(
+    session_id: &str,
+    files: fn(&str) -> Option<String>,
+    export: fn(&str) -> Option<String>,
+) -> Option<String> {
+    files(session_id).or_else(|| export(session_id))
+}
+
+/// Read the first prompt through `opencode export`.
+fn opencode_export_first_prompt(session_id: &str) -> Option<String> {
+    let stdout = crate::opencode::export_session(session_id)?;
+    let value = opencode_export_value(&stdout)?;
+    opencode_export_first_prompt_value(&value)
+}
+
+/// Parse `opencode export` stdout into JSON. A banner can precede the object
+/// and a footer can follow it, and either can carry its own braces, so on a
+/// failed whole-string parse the anchors walk inward: up to nine `{` starts
+/// crossed with up to nine `}` ends, largest span first. Largest first is
+/// what makes the walk pick the session object over a brace-bearing noise
+/// line, and the fixed candidate count keeps pathological input from
+/// turning into a parse storm. Anything unparseable fails safely.
+fn opencode_export_value(stdout: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str(stdout) {
+        return Some(value);
+    }
+    let starts: Vec<usize> = stdout
+        .match_indices('{')
+        .take(NOISE_ANCHORS)
+        .map(|(i, _)| i)
+        .collect();
+    let ends: Vec<usize> = stdout
+        .rmatch_indices('}')
+        .take(NOISE_ANCHORS)
+        .map(|(i, _)| i)
+        .collect();
+    let mut spans: Vec<(usize, usize)> = starts
+        .iter()
+        .flat_map(|&start| {
+            ends.iter()
+                .filter(move |&&end| end >= start)
+                .map(move |&end| (start, end))
+        })
+        .collect();
+    spans.sort_by_key(|&(start, end)| std::cmp::Reverse(end - start));
+    for (start, end) in spans {
+        if let Ok(value) = serde_json::from_str(&stdout[start..=end]) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// How many brace anchors on each side the noise-tolerant parse walks.
+const NOISE_ANCHORS: usize = 9;
+
+/// Extract the first genuine user prompt from an `opencode export` JSON value.
+/// Pure so it is unit-testable; the caller handles the subprocess.
+fn opencode_export_first_prompt_value(value: &serde_json::Value) -> Option<String> {
+    let messages = value.get("messages")?.as_array()?;
+    for message in messages {
+        if message
+            .get("info")
+            .and_then(|i| i.get("role"))
+            .and_then(|r| r.as_str())
+            != Some("user")
+        {
+            continue;
+        }
+        let text = join_text_blocks(message.get("parts"));
+        if let Some(text) = genuine_prompt(text) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// Legacy opencode layout: a session is split across
+/// `storage/message/<session_id>/msg_*.json` (role metadata) and
+/// `storage/part/<message_id>/prt_*.json` (content blocks).
+/// Message and part ids are time-ordered, so a filename sort is chronological.
+fn opencode_files_first_prompt(session_id: &str) -> Option<String> {
     let root = opencode_storage_root()?;
     let msg_dir = root.join("message").join(session_id);
     for msg_path in sorted_json_files(&msg_dir) {
@@ -378,11 +488,9 @@ fn opencode_first_prompt(session_id: &str) -> Option<String> {
             },
         };
         let text = opencode_message_text(&root, &message_id);
-        let text = text.trim();
-        if text.is_empty() || is_wrapped_context(text) {
-            continue;
+        if let Some(text) = genuine_prompt(text) {
+            return Some(text);
         }
-        return Some(text.to_string());
     }
     None
 }
@@ -709,5 +817,126 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!(prompt.as_deref(), Some("帮我看下"));
+    }
+
+    #[test]
+    fn opencode_export_skips_wrapped_context() {
+        let json = concat!(
+            r#"{"info":{},"messages":["#,
+            r#"{"info":{"role":"user"},"parts":[{"type":"text","text":"<user_info>env</user_info>"}]},"#,
+            r#"{"info":{"role":"user"},"parts":[{"type":"text","text":"Add OAuth login to the dashboard"}]}"#,
+            r#"]}"#,
+        );
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("Add OAuth login to the dashboard")
+        );
+    }
+
+    #[test]
+    fn opencode_export_joins_text_parts() {
+        let json = concat!(
+            r#"{"messages":[{"info":{"role":"user"},"parts":["#,
+            r#"{"type":"text","text":"First line"},"#,
+            r#"{"type":"file","text":"skip me"},"#,
+            r#"{"type":"text","text":"second half"}"#,
+            r#"]}]}"#,
+        );
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("First line\nsecond half")
+        );
+    }
+
+    #[test]
+    fn opencode_export_no_user_prompt_returns_none() {
+        let json = concat!(
+            r#"{"messages":["#,
+            r#"{"info":{"role":"assistant"},"parts":[{"type":"text","text":"hi"}]},"#,
+            r#"{"info":{"role":"user"},"parts":[{"type":"text","text":"  "}]},"#,
+            r#"{"info":{"role":"user"},"parts":[{"type":"text","text":"<system-reminder>x</system-reminder>"}]}"#,
+            r#"]}"#,
+        );
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(opencode_export_first_prompt_value(&value).is_none());
+    }
+
+    #[test]
+    fn opencode_export_value_strips_surrounding_noise() {
+        let json =
+            r#"{"messages":[{"info":{"role":"user"},"parts":[{"type":"text","text":"hello"}]}]}"#;
+        let banner = "Exporting session: ses_x\n";
+        let value = opencode_export_value(&format!("{banner}{json}")).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("hello")
+        );
+        let value = opencode_export_value(&format!("{json}\nDone.")).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("hello")
+        );
+        // Banner noise that itself contains braces must not defeat the
+        // span walk.
+        let braced_banner = "config: {\"theme\":\"dark\"} loaded\n";
+        let value = opencode_export_value(&format!("{braced_banner}{json}")).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("hello")
+        );
+        // The same holds for footer noise with braces, and for both sides.
+        let value = opencode_export_value(&format!("{json}\nstate {{ok}}")).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("hello")
+        );
+        let value = opencode_export_value(&format!("{braced_banner}{json}\nstate {{ok}}")).unwrap();
+        assert_eq!(
+            opencode_export_first_prompt_value(&value).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn opencode_export_value_rejects_garbage() {
+        assert!(opencode_export_value("").is_none());
+        assert!(opencode_export_value("no json here").is_none());
+        assert!(opencode_export_value("{\"messages\":[]}").is_some());
+        assert!(opencode_export_value("} {").is_none());
+    }
+
+    fn files_hit(_session: &str) -> Option<String> {
+        Some("from files".to_string())
+    }
+
+    fn files_miss(_session: &str) -> Option<String> {
+        None
+    }
+
+    fn export_hit(_session: &str) -> Option<String> {
+        Some("from export".to_string())
+    }
+
+    #[test]
+    fn opencode_fall_through_files_hit_wins() {
+        assert_eq!(
+            opencode_first_prompt_with("ses_x", files_hit, export_hit).as_deref(),
+            Some("from files")
+        );
+    }
+
+    #[test]
+    fn opencode_fall_through_files_miss_uses_export() {
+        assert_eq!(
+            opencode_first_prompt_with("ses_x", files_miss, export_hit).as_deref(),
+            Some("from export")
+        );
+    }
+
+    #[test]
+    fn opencode_fall_through_both_miss_is_none() {
+        assert!(opencode_first_prompt_with("ses_x", files_miss, files_miss).is_none());
     }
 }

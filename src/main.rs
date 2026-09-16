@@ -576,8 +576,13 @@ fn debug_log(message: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use super::opencode::EXPORT_TIMEOUT;
     use super::{
         compose_branch, folder_label, generate_from_models, marker_key_for_pane, pane_suffix,
+        CLAIM_TTL, PROMPT_POLL_ATTEMPTS, PROMPT_POLL_DELAY, SESSION_POLL_ATTEMPTS,
+        SESSION_POLL_DELAY,
     };
 
     #[test]
@@ -658,5 +663,26 @@ mod tests {
     #[test]
     fn marker_key_is_safe_for_pane_ids() {
         assert_eq!(marker_key_for_pane("w5V:p1"), "pane-w5V_p1");
+    }
+
+    /// The claim-freshness dedupe assumes a cold phase finishes inside
+    /// CLAIM_TTL. Pin the poll arithmetic so a change to the poll constants or
+    /// the export ceiling cannot silently rot that guarantee: the worst case is
+    /// every prompt poll attempt running an export to the full opencode
+    /// ceiling, plus the inter-attempt delays on both polls. The assertion also
+    /// requires real headroom, because wait granularity, engine calls, renames,
+    /// and herdr pane polls draw from the same budget without being on the
+    /// books here.
+    #[test]
+    fn cold_phase_poll_budget_stays_under_claim_ttl() {
+        let prompt_poll =
+            EXPORT_TIMEOUT * PROMPT_POLL_ATTEMPTS + PROMPT_POLL_DELAY * (PROMPT_POLL_ATTEMPTS - 1);
+        let session_poll = SESSION_POLL_DELAY * (SESSION_POLL_ATTEMPTS - 1);
+        let budget = prompt_poll + session_poll;
+        let margin = CLAIM_TTL - budget;
+        assert!(
+        margin > Duration::from_secs(5),
+        "cold-phase poll budget {budget:?} leaves only {margin:?} inside the {CLAIM_TTL:?} claim TTL; real subprocess costs draw from this headroom"
+    );
     }
 }

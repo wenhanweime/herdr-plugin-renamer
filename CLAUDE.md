@@ -188,6 +188,8 @@ when Foundation is unavailable. The plugin's
 cargo test                 # unit tests (engine/slug/context/transcript)
 cargo test foundation -- --ignored   # live on-device helper check (needs the
                                       # Swift build + Apple Intelligence)
+cargo test export -- --ignored   # live opencode export check (needs the
+                                  # opencode CLI)
 cargo build --release      # produces target/release/herdr-plugin-renamer
 cargo fmt                  # format
 just build                 # build local Rust and macOS Swift artifacts
@@ -203,13 +205,17 @@ This fork diverges from the upstream doc above in these ways:
 
 - Agents: transcript parsers also cover `pi` (JSONL), `grok`
   (`chat_history.jsonl`, prompt inside `<user_query>` tags), and `opencode`
-  (`storage/message/<ses>/msg_*.json` + `storage/part/<msg>/prt_*.json`).
+  (legacy file layout `storage/message/<ses>/msg_*.json` +
+  `storage/part/<msg>/prt_*.json` is probed first; opencode 1.18+ keeps
+  sessions in SQLite, so when the legacy layout does not resolve the parser reads through
+  `opencode export`, which is backend-agnostic).
   Path-form session values (pi reports the transcript path) are used directly.
   Grok has no integration: `grok.rs` resolves the session from
   `~/.grok/active_sessions.json` by pane foreground pid, else cwd+newest-live.
 - Engines: `pi.rs` (ephemeral, tool-free `pi --print`, optional `pi-models`
   fallback list; otherwise Pi's configured default) and
-  `opencode.rs` (headless `opencode run`, free-model knob `opencode-models`).
+  `opencode.rs` (headless `opencode run`, free-model knob `opencode-models`,
+  plus `opencode export` spawning for the first-prompt reader).
   Both use ordered model fallback. `engine_chain` accepts comma-separated
   agents and defaults to pi → opencode; Claude, Codex, and Foundation remain
   explicit opt-ins. Engine knobs resolve env-first, then a same-named file in
