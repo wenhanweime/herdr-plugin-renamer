@@ -204,6 +204,7 @@ fn cold_phase() {
     // Note: multi-tab siblings share one workspace label (last writer wins).
     let targets = resolve_targets();
     let folder = folder_label(snapshot.cwd.as_deref());
+    let tab_label = tab_label_mode();
     if targets.iter().any(|t| t == "pane") {
         let ok = herdr::pane_rename(&pane_id, &name);
         debug_log(&format!("cold: pane {pane_id} -> {name} ok={ok}"));
@@ -211,20 +212,29 @@ fn cold_phase() {
     if targets.iter().any(|t| t == "tab") {
         match snapshot.tab_id.as_deref() {
             Some(tab_id) => {
-                if !is_linked_worktree {
-                    let ws_ok = herdr::workspace_rename(&workspace_id, &name);
-                    debug_log(&format!(
-                        "cold: title-on-workspace (bright) ws={workspace_id}->{name} ok={ws_ok}"
-                    ));
+                if tab_label == "title" {
+                    // title mode: the generated name goes on the tab label
+                    // itself and the workspace label is left untouched — useful
+                    // for multi-tab workspaces where sibling tabs each carry
+                    // their own session title.
+                    let tab_ok = herdr::tab_rename(tab_id, &name);
+                    debug_log(&format!("cold: tab {tab_id}->{name} ok={tab_ok} (title on tab)"));
                 } else {
-                    debug_log(
-                        "cold: skip title workspace rename (linked worktree keeps slug path)",
-                    );
+                    if !is_linked_worktree {
+                        let ws_ok = herdr::workspace_rename(&workspace_id, &name);
+                        debug_log(&format!(
+                            "cold: title-on-workspace (bright) ws={workspace_id}->{name} ok={ws_ok}"
+                        ));
+                    } else {
+                        debug_log(
+                            "cold: skip title workspace rename (linked worktree keeps slug path)",
+                        );
+                    }
+                    let tab_ok = herdr::tab_rename(tab_id, &folder);
+                    debug_log(&format!(
+                        "cold: tab {tab_id}->{folder} ok={tab_ok} (folder on dim row)"
+                    ));
                 }
-                let tab_ok = herdr::tab_rename(tab_id, &folder);
-                debug_log(&format!(
-                    "cold: tab {tab_id}->{folder} ok={tab_ok} (folder on dim row)"
-                ));
             }
             None => debug_log("cold: skip tab rename, no tab_id in snapshot"),
         }
@@ -415,6 +425,27 @@ fn resolve_targets() -> Vec<String> {
         vec!["tab".into()]
     } else {
         parsed
+    }
+}
+
+/// What the `tab` target writes: the `HERDR_NAMING_TAB_LABEL` env var, then a
+/// `tab-label` file in the per-plugin config dir, else `folder`. `folder`
+/// keeps the default behavior (title on the bright workspace row, folder
+/// basename on the dim tab row); `title` writes the generated title on the tab
+/// label directly and leaves the workspace label untouched.
+fn tab_label_mode() -> String {
+    let raw = env::var("HERDR_NAMING_TAB_LABEL")
+        .ok()
+        .or_else(|| {
+            let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
+            std::fs::read_to_string(format!("{dir}/tab-label")).ok()
+        })
+        .unwrap_or_default();
+    let mode = raw.trim().to_ascii_lowercase();
+    if mode == "title" {
+        "title".into()
+    } else {
+        "folder".into()
     }
 }
 
