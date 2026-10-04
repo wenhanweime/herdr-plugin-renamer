@@ -89,6 +89,7 @@ var that takes precedence (env vars must be visible to the herdr server).
 | `opencode-model` / `HERDR_NAMING_OPENCODE_MODEL` | unset                              | Legacy single-model override, used only when the plural setting is absent; `default` uses OpenCode's own selection |
 | `style` / `HERDR_NAMING_STYLE`                   | `en`                              | `zh` = Chinese labels + ASCII branch slug (one engine call returns both) |
 | `targets` / `HERDR_NAMING_TARGETS`               | `tab`                             | Comma-separated subset of `pane,tab,agent` to rename |
+| `tab-label` / `HERDR_NAMING_TAB_LABEL`       | `folder`                          | `folder` keeps the default (title on workspace, folder name on tab); `title` writes the generated title on the tab label and leaves the workspace label alone — useful for multi-tab workspaces |
 | `branch-prefix` / `HERDR_NAMING_BRANCH_PREFIX`   | none                              | Prefix for renamed worktree branches (`you/fix-cache`) |
 | `HERDR_NAMING_OPENCODE_BIN` / `HERDR_NAMING_CLAUDE_BIN` / `HERDR_NAMING_CODEX_BIN` / `HERDR_NAMING_FOUNDATION_BIN` | auto | Engine binary overrides (standard install paths are probed, since the herdr server often runs with a minimal PATH) |
 | `HERDR_NAMING_CLAUDE_MODEL`                      | unset                             | Optional `--model` for the claude engine |
